@@ -1,0 +1,6 @@
+{
+  "name": "VocabBrush",
+  "description": "An interactive English vocabulary learning app where you can paint/brush over unknown words in real-time, get instant AI explanations from Gemini, save them to a database, and review them using a home-screen multiple-choice quiz widget.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,21 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. 使用者個人資料 (users/{userId})
+    match /users/{userId} {
+      // 僅允許登入使用者本人讀取與更新自己的資料
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // 2. 班級作業資料 (classes/{classId}/assignments/{assignmentId})
+    match /classes/{classId}/assignments/{assignmentId} {
+      // 1. 允許所有人（包含未登入的使用者/學生）公開讀取班級作業
+      allow read: if true;
+      
+      // 2. 僅允許特定的老師 UID 進行作業的建立、修改與刪除
+      // 請將 'YOUR_TEACHER_UID' 替換為實際老師帳號的 Firebase Auth UID
+      allow create, update, delete: if request.auth != null && request.auth.uid == 'YOUR_TEACHER_UID';
+    }
+  }
+}
