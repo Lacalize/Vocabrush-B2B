@@ -21,6 +21,8 @@ import com.google.firebase.firestore.SetOptions
 import com.example.network.VocabDetail
 import com.example.network.VocabTranslationHelper
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -345,55 +347,60 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     delay(500)
                 } else {
-                    // 2. Try Cloud Cache (第二層快取：模擬雲端快取服務)
-                    dailyInitMessage = "📡 本地快取未命中 (Local Cache Miss)，正在查詢雲端快取 (Cloud Cache)..."
-                    delay(600) // Simulate cloud connection latency
-                    val cloudCached = withContext(Dispatchers.IO) {
-                        repository.getCloudCachedNewsByCategoryAndDate(category, todayString)
-                    }
+                    // 2. Try Real Firestore Cloud Cache
+                    dailyInitMessage = "📡 本地快取未命中，正在查詢 Firestore 全局共享新聞快取 (Community Articles)..."
                     
-                    if (cloudCached.isNotEmpty()) {
-                        dailyInitMessage = "☁️ 雲端快取命中 (Cloud Cache Hit)！將教材同步至本地並載入..."
-                        // Save from Cloud to Local (Cache-Aside Pattern)
+                    var firestoreArticles = getFirestoreCloudCachedNews(category, todayString)
+                    
+                    if (firestoreArticles.isEmpty()) {
+                        val cloudCached = withContext(Dispatchers.IO) {
+                            repository.getCloudCachedNewsByCategoryAndDate(category, todayString)
+                        }
+                        if (cloudCached.isNotEmpty()) {
+                            firestoreArticles = cloudCached.map {
+                                com.example.network.NewsArticle(
+                                    source = null,
+                                    author = it.author,
+                                    title = it.title,
+                                    description = it.description,
+                                    content = null,
+                                    contentEasy = it.contentEasy,
+                                    contentMedium = it.contentMedium,
+                                    contentHard = it.contentHard,
+                                    url = "AI-Generated",
+                                    urlToImage = null,
+                                    image = null,
+                                    publishedAt = it.publishedAt
+                                )
+                            }
+                        }
+                    }
+
+                    if (firestoreArticles.isNotEmpty()) {
+                        dailyInitMessage = "☁️ 雲端共享快取命中 (Firestore Cache Hit)！將教材同步至本地..."
                         withContext(Dispatchers.IO) {
                             repository.deleteOldCachedNews(todayString)
-                            cloudCached.forEach {
+                            firestoreArticles.forEach {
                                 repository.insertCachedNews(
                                     com.example.data.CachedNews(
-                                        category = it.category,
+                                        category = category,
                                         title = it.title,
-                                        description = it.description,
-                                        contentEasy = it.contentEasy,
-                                        contentMedium = it.contentMedium,
-                                        contentHard = it.contentHard,
-                                        dateString = it.dateString,
-                                        author = it.author,
-                                        publishedAt = it.publishedAt
+                                        description = it.description ?: "",
+                                        contentEasy = it.contentEasy ?: "",
+                                        contentMedium = it.contentMedium ?: "",
+                                        contentHard = it.contentHard ?: "",
+                                        dateString = todayString,
+                                        author = it.author ?: "AI Gemini",
+                                        publishedAt = it.publishedAt ?: "Cloud Cache"
                                     )
                                 )
                             }
                         }
-                        
-                        _newsArticles.value = cloudCached.map {
-                            com.example.network.NewsArticle(
-                                source = null,
-                                author = it.author,
-                                title = it.title,
-                                description = it.description,
-                                content = null,
-                                contentEasy = it.contentEasy,
-                                contentMedium = it.contentMedium,
-                                contentHard = it.contentHard,
-                                url = "AI-Generated",
-                                urlToImage = null,
-                                image = null,
-                                publishedAt = it.publishedAt
-                            )
-                        }
-                        delay(600)
+                        _newsArticles.value = firestoreArticles
+                        delay(400)
                     } else {
-                        // 3. Cloud Cache Miss -> Generate with Gemini (模擬雲端主資料庫 + AI 產生)
-                        dailyInitMessage = "🌐 雙層快取均未命中！正在聯絡 GNews 並由 Gemini 生成今日專屬 3 版本(難,中,易)時事教材..."
+                        // 3. Cloud Cache Miss -> Generate with Gemini
+                        dailyInitMessage = "🌐 全局快取未命中！正在透過 Gemini 生成今日 3 難度時事教材並同步至 Firestore 全局快取..."
                         generateAndCacheNewsForCategory(category, todayString)
                     }
                 }
@@ -595,6 +602,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             _newsArticles.value = articlesList
+            saveToFirestoreCommunityArticles(category, todayString, articlesList)
         } else {
             _newsFetchError.value = "AI 生成時事文章失敗，傳回內容為空。請稍後重試。"
         }
@@ -636,46 +644,52 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                // 2. Try Cloud Cache
-                val cloudCached = withContext(Dispatchers.IO) {
-                    repository.getCloudCachedNewsByCategoryAndDate(category, todayString)
+                // 2. Try Firestore Cloud Cache
+                var firestoreArticles = getFirestoreCloudCachedNews(category, todayString)
+                if (firestoreArticles.isEmpty()) {
+                    val cloudCached = withContext(Dispatchers.IO) {
+                        repository.getCloudCachedNewsByCategoryAndDate(category, todayString)
+                    }
+                    if (cloudCached.isNotEmpty()) {
+                        firestoreArticles = cloudCached.map {
+                            com.example.network.NewsArticle(
+                                source = null,
+                                author = it.author,
+                                title = it.title,
+                                description = it.description,
+                                content = null,
+                                contentEasy = it.contentEasy,
+                                contentMedium = it.contentMedium,
+                                contentHard = it.contentHard,
+                                url = "AI-Generated",
+                                urlToImage = null,
+                                image = null,
+                                publishedAt = it.publishedAt
+                            )
+                        }
+                    }
                 }
                 
-                if (cloudCached.isNotEmpty()) {
+                if (firestoreArticles.isNotEmpty()) {
                     withContext(Dispatchers.IO) {
                         repository.deleteOldCachedNews(todayString)
-                        cloudCached.forEach {
+                        firestoreArticles.forEach {
                             repository.insertCachedNews(
                                 com.example.data.CachedNews(
-                                    category = it.category,
+                                    category = category,
                                     title = it.title,
-                                    description = it.description,
-                                    contentEasy = it.contentEasy,
-                                    contentMedium = it.contentMedium,
-                                    contentHard = it.contentHard,
-                                    dateString = it.dateString,
-                                    author = it.author,
-                                    publishedAt = it.publishedAt
+                                    description = it.description ?: "",
+                                    contentEasy = it.contentEasy ?: "",
+                                    contentMedium = it.contentMedium ?: "",
+                                    contentHard = it.contentHard ?: "",
+                                    dateString = todayString,
+                                    author = it.author ?: "AI Gemini",
+                                    publishedAt = it.publishedAt ?: "Cloud Cache"
                                 )
                             )
                         }
                     }
-                    _newsArticles.value = cloudCached.map {
-                        com.example.network.NewsArticle(
-                            source = null,
-                            author = it.author,
-                            title = it.title,
-                            description = it.description,
-                            content = null,
-                            contentEasy = it.contentEasy,
-                            contentMedium = it.contentMedium,
-                            contentHard = it.contentHard,
-                            url = "AI-Generated",
-                            urlToImage = null,
-                            image = null,
-                            publishedAt = it.publishedAt
-                        )
-                    }
+                    _newsArticles.value = firestoreArticles
                     _isNewsLoading.value = false
                     return@launch
                 }
@@ -1240,5 +1254,83 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
         assignmentListenerRegistration?.remove()
         assignmentListenerRegistration = null
+    }
+
+    /**
+     * Queries real Firestore collection "community_articles" for shared news across all users
+     */
+    suspend fun getFirestoreCloudCachedNews(category: String, dateString: String): List<com.example.network.NewsArticle> {
+        val db = firestore ?: return emptyList()
+        return try {
+            val snapshot = suspendCancellableCoroutine<com.google.firebase.firestore.QuerySnapshot?> { cont ->
+                db.collection("community_articles")
+                    .whereEqualTo("category", category)
+                    .whereEqualTo("dateString", dateString)
+                    .get()
+                    .addOnSuccessListener { snp -> cont.resume(snp) }
+                    .addOnFailureListener { cont.resume(null) }
+            }
+            if (snapshot != null && !snapshot.isEmpty) {
+                snapshot.documents.mapNotNull { doc ->
+                    val title = doc.getString("title") ?: return@mapNotNull null
+                    val desc = doc.getString("description")
+                    val contentEasy = doc.getString("contentEasy")
+                    val contentMedium = doc.getString("contentMedium")
+                    val contentHard = doc.getString("contentHard")
+                    val author = doc.getString("author") ?: "AI Gemini (Cloud Shared)"
+                    val publishedAt = doc.getString("publishedAt") ?: "Cloud Shared"
+                    com.example.network.NewsArticle(
+                        source = null,
+                        author = author,
+                        title = title,
+                        description = desc,
+                        content = null,
+                        contentEasy = contentEasy,
+                        contentMedium = contentMedium,
+                        contentHard = contentHard,
+                        url = "AI-Generated",
+                        urlToImage = null,
+                        image = null,
+                        publishedAt = publishedAt
+                    )
+                }
+            } else {
+                emptyList()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("VocabViewModel", "Error querying community_articles from Firestore", e)
+            emptyList()
+        }
+    }
+
+    /**
+     * Saves generated news articles to Firestore "community_articles" collection so all students share API cost
+     */
+    fun saveToFirestoreCommunityArticles(category: String, dateString: String, articles: List<com.example.network.NewsArticle>) {
+        val db = firestore ?: return
+        try {
+            articles.forEachIndexed { index, art ->
+                val docId = "${category}_${dateString}_$index".lowercase().replace(Regex("[^a-z0-9_]"), "")
+                val data = hashMapOf(
+                    "category" to category,
+                    "dateString" to dateString,
+                    "title" to art.title,
+                    "description" to (art.description ?: ""),
+                    "contentEasy" to (art.contentEasy ?: ""),
+                    "contentMedium" to (art.contentMedium ?: ""),
+                    "contentHard" to (art.contentHard ?: ""),
+                    "author" to (art.author ?: "AI Gemini"),
+                    "publishedAt" to (art.publishedAt ?: "Just now by Gemini"),
+                    "createdAt" to System.currentTimeMillis()
+                )
+                db.collection("community_articles").document(docId)
+                    .set(data, SetOptions.merge())
+                    .addOnSuccessListener {
+                        android.util.Log.d("VocabViewModel", "Successfully published shared community article: $docId")
+                    }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("VocabViewModel", "Error writing community_articles to Firestore", e)
+        }
     }
 }

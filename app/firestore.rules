@@ -13,9 +13,21 @@ service cloud.firestore {
       // 1. 允許所有人（包含未登入的使用者/學生）公開讀取班級作業
       allow read: if true;
       
-      // 2. 僅允許特定的老師 UID 進行作業的建立、修改與刪除
-      // 請將 'YOUR_TEACHER_UID' 替換為實際老師帳號的 Firebase Auth UID
-      allow create, update, delete: if request.auth != null && request.auth.uid == 'YOUR_TEACHER_UID';
+      // 2. 允許登入的使用者 (老師/管理員) 進行作業的建立、修改與刪除
+      allow create, update, delete: if request.auth != null;
+    }
+
+    // 3. 公共單字庫快取 (public_dictionary/{wordId})
+    match /public_dictionary/{wordId} {
+      // 允許全體使用者（含訪客與登入學生）讀取與貢獻快取單字，達成跨使用者 API 費用節省
+      allow read, write: if true;
+    }
+
+    // 4. 全局共享新聞與 AI 時事教材快取 (community_articles/{articleId})
+    match /community_articles/{articleId} {
+      // 允許全體使用者讀取與寫入共享新聞，避免重複對 Gemini 生成長文
+      allow read, write: if true;
     }
   }
 }
+

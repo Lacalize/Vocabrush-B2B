@@ -62,7 +62,7 @@ data class VocabDetail(
 )
 
 interface GeminiApi {
-    @POST("v1beta/models/gemini-3.5-flash:generateContent")
+    @POST("v1beta/models/gemini-2.5-flash:generateContent")
     suspend fun generateContent(
         @Query("key") apiKey: String,
         @Body request: GeminiRequest
@@ -106,13 +106,24 @@ object VocabTranslationHelper {
         .build()
     private val vocabAdapter = moshi.adapter(VocabDetail::class.java)
 
+    // In-memory cache for ultra-fast zero-latency repeat lookup within same session
+    private val inMemoryCache = java.util.concurrent.ConcurrentHashMap<String, VocabDetail>()
+
     /**
      * Query Firestore public dictionary first to avoid calling Gemini API.
      */
     suspend fun getFromPublicDictionary(db: FirebaseFirestore?, word: String): VocabDetail? {
-        if (db == null) return null
         val cleanWord = word.trim().lowercase().replace(Regex("[^a-zA-Z-]"), "")
         if (cleanWord.isEmpty()) return null
+
+        // Level 1: In-Memory L1 Cache
+        val memoryHit = inMemoryCache[cleanWord]
+        if (memoryHit != null) {
+            Log.d("VocabTranslation", "In-memory L1 cache HIT for '$cleanWord'!")
+            return memoryHit
+        }
+
+        if (db == null) return null
 
         return try {
             val snapshot = suspendCancellableCoroutine<DocumentSnapshot?> { cont ->
@@ -129,7 +140,7 @@ object VocabTranslationHelper {
                     val phonetic = snapshot.getString("phonetic") ?: ""
                     val pos = snapshot.getString("partOfSpeech") ?: ""
                     Log.d("VocabTranslation", "Public dictionary HIT for '$cleanWord'!")
-                    VocabDetail(
+                    val detail = VocabDetail(
                         word = matchedWord,
                         translation = trans,
                         definition = def,
@@ -137,6 +148,8 @@ object VocabTranslationHelper {
                         partOfSpeech = pos,
                         source = "PUBLIC_DICT"
                     )
+                    inMemoryCache[cleanWord] = detail
+                    detail
                 } else {
                     null
                 }
@@ -153,7 +166,6 @@ object VocabTranslationHelper {
      * Save a new translation to Firestore public_dictionary so future queries across users hit cache.
      */
     fun saveToPublicDictionary(db: FirebaseFirestore?, detail: VocabDetail) {
-        if (db == null) return
         val cleanWord = detail.word.trim().lowercase().replace(Regex("[^a-zA-Z-]"), "")
         if (cleanWord.isEmpty()) return
         if (detail.translation.isBlank() || 
@@ -161,6 +173,10 @@ object VocabTranslationHelper {
             detail.translation.contains("金鑰") || 
             detail.translation.contains("錯誤")
         ) return
+
+        inMemoryCache[cleanWord] = detail
+
+        if (db == null) return
 
         try {
             val data = hashMapOf(
@@ -256,68 +272,105 @@ object VocabTranslationHelper {
             )
         )
 
-        return try {
-            val response = if (ProxyGatewayConfig.isEnabled) {
-                val url = if (ProxyGatewayConfig.proxyBaseUrl.endsWith("/")) {
-                    ProxyGatewayConfig.proxyBaseUrl + "v1beta/models/gemini-3.5-flash:generateContent"
-                } else {
-                    ProxyGatewayConfig.proxyBaseUrl + "/v1beta/models/gemini-3.5-flash:generateContent"
-                }
-                
-                val headers = mutableMapOf<String, String>()
-                if (ProxyGatewayConfig.customHeaderKey.isNotBlank() && ProxyGatewayConfig.customHeaderValue.isNotBlank()) {
-                    headers[ProxyGatewayConfig.customHeaderKey] = ProxyGatewayConfig.customHeaderValue
-                }
-                
-                Log.d("VocabTranslation", "Calling proxy gateway url: $url")
-                GeminiClient.api.generateContentProxy(url, headers, request)
-            } else {
-                GeminiClient.api.generateContent(apiKey, request)
-            }
+        // Exponential backoff retry loop (max 3 attempts for 429/503)
+        var maxAttempts = 3
+        var currentAttempt = 0
+        var lastException: Exception? = null
 
-            val jsonText = response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
-            if (jsonText != null) {
-                Log.d("VocabTranslation", "Received JSON: $jsonText")
-                var cleanedJson = jsonText.trim()
-                if (cleanedJson.startsWith("```json")) {
-                    cleanedJson = cleanedJson.removePrefix("```json")
-                } else if (cleanedJson.startsWith("```")) {
-                    cleanedJson = cleanedJson.removePrefix("```")
+        while (currentAttempt < maxAttempts) {
+            currentAttempt++
+            try {
+                val response = if (ProxyGatewayConfig.isEnabled) {
+                    try {
+                        val url = if (ProxyGatewayConfig.proxyBaseUrl.endsWith("/")) {
+                            ProxyGatewayConfig.proxyBaseUrl + "v1beta/models/gemini-2.5-flash:generateContent"
+                        } else {
+                            ProxyGatewayConfig.proxyBaseUrl + "/v1beta/models/gemini-2.5-flash:generateContent"
+                        }
+                        
+                        val headers = mutableMapOf<String, String>()
+                        if (ProxyGatewayConfig.customHeaderKey.isNotBlank() && ProxyGatewayConfig.customHeaderValue.isNotBlank()) {
+                            headers[ProxyGatewayConfig.customHeaderKey] = ProxyGatewayConfig.customHeaderValue
+                        }
+                        
+                        Log.d("VocabTranslation", "Calling proxy gateway (Attempt $currentAttempt) url: $url")
+                        GeminiClient.api.generateContentProxy(url, headers, request)
+                    } catch (proxyEx: Exception) {
+                        if (hasKey) {
+                            Log.w("VocabTranslation", "Proxy failed, falling back to direct Gemini API with key", proxyEx)
+                            GeminiClient.api.generateContent(apiKey, request)
+                        } else {
+                            throw proxyEx
+                        }
+                    }
+                } else {
+                    GeminiClient.api.generateContent(apiKey, request)
                 }
-                if (cleanedJson.endsWith("```")) {
-                    cleanedJson = cleanedJson.removeSuffix("```")
+
+                val jsonText = response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
+                if (jsonText != null) {
+                    Log.d("VocabTranslation", "Received JSON: $jsonText")
+                    var cleanedJson = jsonText.trim()
+                    if (cleanedJson.startsWith("```json")) {
+                        cleanedJson = cleanedJson.removePrefix("```json")
+                    } else if (cleanedJson.startsWith("```")) {
+                        cleanedJson = cleanedJson.removePrefix("```")
+                    }
+                    if (cleanedJson.endsWith("```")) {
+                        cleanedJson = cleanedJson.removeSuffix("```")
+                    }
+                    cleanedJson = cleanedJson.trim()
+                    return vocabAdapter.fromJson(cleanedJson)
+                } else {
+                    return null
                 }
-                cleanedJson = cleanedJson.trim()
-                vocabAdapter.fromJson(cleanedJson)
-            } else {
-                null
+            } catch (e: retrofit2.HttpException) {
+                lastException = e
+                val code = e.code()
+                Log.e("VocabTranslation", "HTTP Error during translation attempt $currentAttempt: $code", e)
+                if ((code == 429 || code == 503) && currentAttempt < maxAttempts) {
+                    val backoffTimeMs = (1000L * (1 shl (currentAttempt - 1))) + (kotlin.random.Random.nextLong(100, 500))
+                    Log.d("VocabTranslation", "Rate limited ($code), retrying in ${backoffTimeMs}ms...")
+                    kotlinx.coroutines.delay(backoffTimeMs)
+                } else {
+                    if (code == 429) {
+                        return VocabDetail(
+                            word = cleanedWord,
+                            translation = "金鑰額度已達上限 (HTTP 429) ⚠️",
+                            definition = "Gemini API 回傳了 Too Many Requests (429) 錯誤。這表示該 API 的呼叫頻率或額度已達到每分鐘/每日的上限，請稍候幾分鐘再試。",
+                            phonetic = ""
+                        )
+                    } else {
+                        return VocabDetail(
+                            word = cleanedWord,
+                            translation = "伺服器回傳錯誤 ($code) ❌",
+                            definition = "Gemini API 呼叫失敗，狀態碼為 $code。這可能是伺服器連線問題，請稍後重試或聯絡開發人員。",
+                            phonetic = ""
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                lastException = e
+                Log.e("VocabTranslation", "Error translating word attempt $currentAttempt", e)
+                if (currentAttempt < maxAttempts) {
+                    val backoffTimeMs = (500L * currentAttempt) + (kotlin.random.Random.nextLong(100, 300))
+                    kotlinx.coroutines.delay(backoffTimeMs)
+                } else {
+                    return VocabDetail(
+                        word = cleanedWord,
+                        translation = "連線失敗 📡",
+                        definition = "發生異常連線錯誤，請檢查您的網路連線。\n詳細日誌: ${e.localizedMessage ?: e.toString()}",
+                        phonetic = ""
+                    )
+                }
             }
-        } catch (e: retrofit2.HttpException) {
-            Log.e("VocabTranslation", "HTTP Error during translation: ${e.code()}", e)
-            val code = e.code()
-            if (code == 429) {
-                VocabDetail(
-                    word = cleanedWord,
-                    translation = "金鑰額度已達上限 (HTTP 429) ⚠️",
-                    definition = "Gemini API 回傳了 Too Many Requests (429) 錯誤。這表示該 API 的呼叫頻率或額度已達到每分鐘/每日的上限，請稍候幾分鐘再試。",
-                    phonetic = ""
-                )
-            } else {
-                VocabDetail(
-                    word = cleanedWord,
-                    translation = "伺服器回傳錯誤 ($code) ❌",
-                    definition = "Gemini API 呼叫失敗，狀態碼為 $code。這可能是伺服器連線問題，請稍後重試或聯絡開發人員。",
-                    phonetic = ""
-                )
-            }
-        } catch (e: Exception) {
-            Log.e("VocabTranslation", "Error translating word", e)
-            VocabDetail(
-                word = cleanedWord,
-                translation = "連線失敗 📡",
-                definition = "發生異常連線錯誤，請檢查您的網路連線。\n詳細日誌: ${e.localizedMessage ?: e.toString()}",
-                phonetic = ""
-            )
         }
+
+        return VocabDetail(
+            word = cleanedWord,
+            translation = "連線失敗 📡",
+            definition = "超過重試次數，請稍後重試。\n詳細日誌: ${lastException?.localizedMessage ?: lastException?.toString()}",
+            phonetic = ""
+        )
     }
 }
