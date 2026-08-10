@@ -496,16 +496,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
             """.trimIndent()
         }
 
-        // 3. Request Gemini to write the articles
-        val geminiApiKey = com.example.BuildConfig.GEMINI_API_KEY
-        val hasKey = geminiApiKey.isNotEmpty() && geminiApiKey != "MY_GEMINI_API_KEY"
-
-        if (!com.example.network.ProxyGatewayConfig.isEnabled && !hasKey) {
-            _newsFetchError.value = "請先在 [個人中心] 設定 Gemini API 金鑰，或在設定中啟用 API 代理伺服器，方能驅動 AI 生成全文時事。"
-            _newsArticles.value = emptyList()
-            return
-        }
-
+        // 3. Request Gemini to write the articles via secure server gateway
         val request = com.example.network.GeminiRequest(
             contents = listOf(
                 com.example.network.Content(parts = listOf(com.example.network.Part(text = prompt)))
@@ -516,100 +507,121 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
             )
         )
 
-        val geminiResponse = withContext(Dispatchers.IO) {
-            if (com.example.network.ProxyGatewayConfig.isEnabled) {
+        try {
+            val idToken = com.example.network.VocabTranslationHelper.fetchFirebaseIdToken()
+            val geminiResponse = withContext(Dispatchers.IO) {
                 val proxyUrl = if (com.example.network.ProxyGatewayConfig.proxyBaseUrl.endsWith("/")) {
-                    com.example.network.ProxyGatewayConfig.proxyBaseUrl + "v1beta/models/gemini-3.5-flash:generateContent"
+                    com.example.network.ProxyGatewayConfig.proxyBaseUrl + "v1beta/models/gemini-2.0-flash:generateContent"
                 } else {
-                    com.example.network.ProxyGatewayConfig.proxyBaseUrl + "/v1beta/models/gemini-3.5-flash:generateContent"
+                    com.example.network.ProxyGatewayConfig.proxyBaseUrl + "/v1beta/models/gemini-2.0-flash:generateContent"
                 }
                 
                 val headers = mutableMapOf<String, String>()
+                if (!idToken.isNullOrBlank()) {
+                    headers["Authorization"] = "Bearer $idToken"
+                }
                 if (com.example.network.ProxyGatewayConfig.customHeaderKey.isNotBlank() && com.example.network.ProxyGatewayConfig.customHeaderValue.isNotBlank()) {
                     headers[com.example.network.ProxyGatewayConfig.customHeaderKey] = com.example.network.ProxyGatewayConfig.customHeaderValue
                 }
-                com.example.network.GeminiClient.api.generateContentProxy(proxyUrl, headers, request)
-            } else {
-                com.example.network.GeminiClient.api.generateContent(geminiApiKey, request)
-            }
-        }
-
-        val jsonText = geminiResponse.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
-        if (!jsonText.isNullOrBlank()) {
-            val articlesList = mutableListOf<com.example.network.NewsArticle>()
-            val jsonArray = org.json.JSONArray(jsonText.trim())
-            
-            // Delete old cached news first to keep DB small
-            withContext(Dispatchers.IO) {
-                repository.deleteOldCachedNews(todayString)
-                repository.deleteOldCloudCachedNews(todayString)
-            }
-
-            for (i in 0 until jsonArray.length()) {
-                val obj = jsonArray.getJSONObject(i)
-                val title = obj.optString("title")
-                val desc = obj.optString("description")
-                val contentEasy = obj.optString("contentEasy")
-                val contentMedium = obj.optString("contentMedium")
-                val contentHard = obj.optString("contentHard")
                 
-                // Save to Simulated Cloud Cache and Local Cache (Cache-Aside Pattern)
+                val maskedHeaders = headers.mapValues { (k, v) ->
+                    if (k.equals("Authorization", ignoreCase = true) && v.length > 15) {
+                        v.take(15) + "...[len ${v.length}]"
+                    } else {
+                        v
+                    }
+                }
+                android.util.Log.d("VocabViewModel", "Calling article generation proxy URL: $proxyUrl | Headers: $maskedHeaders")
+                com.example.network.GeminiClient.api.generateContentProxy(proxyUrl, headers, request)
+            }
+
+            val jsonText = geminiResponse.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
+            if (!jsonText.isNullOrBlank()) {
+                val articlesList = mutableListOf<com.example.network.NewsArticle>()
+                val jsonArray = org.json.JSONArray(jsonText.trim())
+                
+                // Delete old cached news first to keep DB small
                 withContext(Dispatchers.IO) {
-                    repository.insertCloudCachedNews(
-                        com.example.data.CloudCachedNews(
-                            category = category,
-                            title = title,
-                            description = desc,
-                            contentEasy = contentEasy,
-                            contentMedium = contentMedium,
-                            contentHard = contentHard,
-                            dateString = todayString,
-                            author = "AI Gemini",
-                            publishedAt = "Just now by Gemini"
-                        )
-                    )
+                    repository.deleteOldCachedNews(todayString)
+                    repository.deleteOldCloudCachedNews(todayString)
+                }
+
+                for (i in 0 until jsonArray.length()) {
+                    val obj = jsonArray.getJSONObject(i)
+                    val title = obj.optString("title")
+                    val desc = obj.optString("description")
+                    val contentEasy = obj.optString("contentEasy")
+                    val contentMedium = obj.optString("contentMedium")
+                    val contentHard = obj.optString("contentHard")
                     
-                    repository.insertCachedNews(
-                        com.example.data.CachedNews(
-                            category = category,
+                    // Save to Simulated Cloud Cache and Local Cache (Cache-Aside Pattern)
+                    withContext(Dispatchers.IO) {
+                        repository.insertCloudCachedNews(
+                            com.example.data.CloudCachedNews(
+                                category = category,
+                                title = title,
+                                description = desc,
+                                contentEasy = contentEasy,
+                                contentMedium = contentMedium,
+                                contentHard = contentHard,
+                                dateString = todayString,
+                                author = "AI Gemini",
+                                publishedAt = "Just now by Gemini"
+                            )
+                        )
+                        
+                        repository.insertCachedNews(
+                            com.example.data.CachedNews(
+                                category = category,
+                                title = title,
+                                description = desc,
+                                contentEasy = contentEasy,
+                                contentMedium = contentMedium,
+                                contentHard = contentHard,
+                                dateString = todayString,
+                                author = "AI Gemini",
+                                publishedAt = "Just now by Gemini"
+                            )
+                        )
+                    }
+
+                    articlesList.add(
+                        com.example.network.NewsArticle(
+                            source = null,
+                            author = "AI Gemini",
                             title = title,
                             description = desc,
+                            content = null,
                             contentEasy = contentEasy,
                             contentMedium = contentMedium,
                             contentHard = contentHard,
-                            dateString = todayString,
-                            author = "AI Gemini",
+                            url = "AI-Generated",
+                            urlToImage = null,
+                            image = null,
                             publishedAt = "Just now by Gemini"
                         )
                     )
                 }
-
-                articlesList.add(
-                    com.example.network.NewsArticle(
-                        source = null,
-                        author = "AI Gemini",
-                        title = title,
-                        description = desc,
-                        content = null,
-                        contentEasy = contentEasy,
-                        contentMedium = contentMedium,
-                        contentHard = contentHard,
-                        url = "AI-Generated",
-                        urlToImage = null,
-                        image = null,
-                        publishedAt = "Just now by Gemini"
-                    )
-                )
+                _newsArticles.value = articlesList
+                saveToFirestoreCommunityArticles(category, todayString, articlesList)
+            } else {
+                _newsFetchError.value = "AI 生成時事文章失敗，傳回內容為空。請稍後重試。"
             }
-            _newsArticles.value = articlesList
-            saveToFirestoreCommunityArticles(category, todayString, articlesList)
-        } else {
-            _newsFetchError.value = "AI 生成時事文章失敗，傳回內容為空。請稍後重試。"
+        } catch (e: retrofit2.HttpException) {
+            val code = e.code()
+            val errorBody = e.response()?.errorBody()?.string()
+            android.util.Log.e("VocabViewModel", "HTTP $code Error Body during article generation: $errorBody", e)
+            val (title, detailMsg) = com.example.network.VocabTranslationHelper.parseHttpErrorDetails(code, errorBody)
+            _newsFetchError.value = "$title\n$detailMsg"
+        } catch (e: Exception) {
+            android.util.Log.e("VocabViewModel", "Error generating articles", e)
+            _newsFetchError.value = "AI 生成文章失敗：${e.localizedMessage ?: e.toString()}"
         }
     }
 
     // Fetches live news from GNews API, then uses Gemini API to rewrite topics into 5 high-quality, full-length reading articles
     fun fetchCategoryNews(category: String) {
+        if (_isNewsLoading.value) return // Loading guard / anti-double-click lock
         _isNewsLoading.value = true
         _newsFetchError.value = null
         viewModelScope.launch {
@@ -923,9 +935,18 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private var lastTranslationTime = 0L
+    private var lastTranslatedWord = ""
+
     // Request translation for brushed words
     fun translateWord(word: String, paragraphContext: String) {
         if (word.isBlank()) return
+        val now = System.currentTimeMillis()
+        if (word == lastTranslatedWord && (now - lastTranslationTime) < 300) {
+            return // Debounce rapid repeated taps on the same word
+        }
+        lastTranslationTime = now
+        lastTranslatedWord = word
         
         showTranslationCard = true
         _translationState.value = TranslationState.Loading

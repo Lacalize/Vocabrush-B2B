@@ -122,7 +122,7 @@ interface VocabDao {
     suspend fun deleteOldCloudCachedNews(dateString: String)
 }
 
-@Database(entities = [VocabWord::class, ReadArticle::class, CachedNews::class, CloudCachedNews::class, User::class], version = 8, exportSchema = false)
+@Database(entities = [VocabWord::class, ReadArticle::class, CachedNews::class, CloudCachedNews::class, User::class], version = 9, exportSchema = false)
 abstract class VocabDatabase : RoomDatabase() {
     abstract fun vocabDao(): VocabDao
     abstract fun userDao(): UserDao

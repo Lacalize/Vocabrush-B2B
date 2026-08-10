@@ -19,6 +19,7 @@ data class User(
     val vocabGoal: Int = 10, // Daily standard objective/goal
     val preferredCategory: String = "technology", // Selected learning focus
     val vocabLevel: String = "PENDING", // "PENDING", "EASY", "MEDIUM", "HARD"
+    val role: String = "student", // "student", "teacher", "admin"
     val loginCount: Int = 1,
     val totalUsageTimeSeconds: Long = 0
 )

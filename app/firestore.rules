@@ -2,32 +2,88 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // 預設拒絕所有未明確許可的存取
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 通用輔助函式
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isClassMember(classId) {
+      return isAuthenticated() && (
+        (getUserData().classIds != null && classId in getUserData().classIds) ||
+        getUserData().role == 'teacher' ||
+        getUserData().role == 'admin' ||
+        request.auth.token.role == 'teacher' ||
+        request.auth.token.role == 'admin'
+      );
+    }
+
+    function isTeacherOrAdmin() {
+      return isAuthenticated() && (
+        getUserData().role == 'teacher' || 
+        getUserData().role == 'admin' ||
+        request.auth.token.role == 'teacher' ||
+        request.auth.token.role == 'admin'
+      );
+    }
+
     // 1. 使用者個人資料 (users/{userId})
     match /users/{userId} {
-      // 僅允許登入使用者本人讀取與更新自己的資料
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+      allow read: if isOwner(userId) || isTeacherOrAdmin();
+      allow create: if isOwner(userId);
+      // 禁止一般使用者自行修改自己的 role 欄位 (除非原本未包含 role 欄位，或者維持不變，或者由管理者/教師變更)
+      allow update: if isOwner(userId) && (
+        !('role' in request.resource.data) ||
+        !('role' in resource.data) ||
+        request.resource.data.role == resource.data.role ||
+        isTeacherOrAdmin()
+      );
     }
 
     // 2. 班級作業資料 (classes/{classId}/assignments/{assignmentId})
     match /classes/{classId}/assignments/{assignmentId} {
-      // 1. 允許所有人（包含未登入的使用者/學生）公開讀取班級作業
-      allow read: if true;
+      // 僅允許屬於該班級之成員或教師/管理員讀取該班級作業 (多租戶與班級隔離)
+      allow read: if isClassMember(classId);
       
-      // 2. 允許登入的使用者 (老師/管理員) 進行作業的建立、修改與刪除
-      allow create, update, delete: if request.auth != null;
+      // 僅允許該班級之老師或管理員進行作業建立、修改與刪除
+      allow create, update, delete: if isClassMember(classId) && isTeacherOrAdmin();
     }
 
     // 3. 公共單字庫快取 (public_dictionary/{wordId})
     match /public_dictionary/{wordId} {
-      // 允許全體使用者（含訪客與登入學生）讀取與貢獻快取單字，達成跨使用者 API 費用節省
-      allow read, write: if true;
+      // 僅允許已驗證使用者讀取
+      allow read: if isAuthenticated();
+      // 寫入需經過基本欄位格式與長度驗證，防止塞入垃圾資料
+      allow create, update: if isAuthenticated() &&
+        request.resource.data.word is string &&
+        request.resource.data.word.size() > 0 &&
+        request.resource.data.word.size() < 100 &&
+        request.resource.data.translation is string &&
+        request.resource.data.translation.size() < 1000;
     }
 
     // 4. 全局共享新聞與 AI 時事教材快取 (community_articles/{articleId})
     match /community_articles/{articleId} {
-      // 允許全體使用者讀取與寫入共享新聞，避免重複對 Gemini 生成長文
-      allow read, write: if true;
+      // 僅允許已驗證使用者讀取
+      allow read: if isAuthenticated();
+      // 寫入需經過基本欄位格式與長度驗證，防止塞入垃圾資料
+      allow create, update: if isAuthenticated() &&
+        request.resource.data.category is string &&
+        request.resource.data.category.size() < 100 &&
+        request.resource.data.dateString is string &&
+        request.resource.data.dateString.size() < 50;
     }
   }
 }
-

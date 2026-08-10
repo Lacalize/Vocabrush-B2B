@@ -2,6 +2,8 @@ package com.example.network
 
 import android.util.Log
 import com.example.BuildConfig
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
@@ -62,7 +64,7 @@ data class VocabDetail(
 )
 
 interface GeminiApi {
-    @POST("v1beta/models/gemini-2.5-flash:generateContent")
+    @POST("v1beta/models/gemini-2.0-flash:generateContent")
     suspend fun generateContent(
         @Query("key") apiKey: String,
         @Body request: GeminiRequest
@@ -225,20 +227,101 @@ object VocabTranslationHelper {
         return geminiDetail
     }
 
-    suspend fun translateWord(word: String, contextSentence: String): VocabDetail? {
-        val apiKey = BuildConfig.GEMINI_API_KEY
-        val hasKey = apiKey.isNotEmpty() && apiKey != "MY_GEMINI_API_KEY"
+    /**
+     * Helper to retrieve Firebase Auth ID token asynchronously (or sign in anonymously if unauthenticated)
+     */
+    suspend fun fetchFirebaseIdToken(): String? {
+        return try {
+            val auth = FirebaseAuth.getInstance()
+            val user = auth.currentUser ?: run {
+                suspendCancellableCoroutine<FirebaseUser?> { cont ->
+                    auth.signInAnonymously()
+                        .addOnSuccessListener { cont.resume(it.user) }
+                        .addOnFailureListener { cont.resume(null) }
+                }
+            } ?: return null
 
-        if (!ProxyGatewayConfig.isEnabled && !hasKey) {
-            Log.e("VocabTranslation", "Gemini API Key is not set or placeholder!")
-            return VocabDetail(
-                word = word,
-                translation = "AI 翻譯服務未設定 🔒",
-                definition = "無法翻譯字詞。系統未偵測到有效的翻譯服務連線設定，請聯絡開發人員或系統管理員。",
-                phonetic = ""
-            )
+            suspendCancellableCoroutine<String?> { cont ->
+                user.getIdToken(false)
+                    .addOnSuccessListener { result -> cont.resume(result.token) }
+                    .addOnFailureListener { cont.resume(null) }
+            }
+        } catch (e: Exception) {
+            Log.e("VocabTranslation", "Failed to obtain Firebase Auth ID token", e)
+            null
+        }
+    }
+
+    fun parseHttpErrorDetails(code: Int, errorBody: String?): Pair<String, String> {
+        if (errorBody.isNullOrBlank()) {
+            return Pair("HTTP $code 錯誤 ❌", "伺服器未回傳詳細錯誤說明 (HTTP $code)。")
         }
 
+        var extractedMessage = ""
+        var extractedStatus = ""
+        try {
+            val jsonObj = org.json.JSONObject(errorBody)
+            if (jsonObj.has("error")) {
+                val errObj = jsonObj.getJSONObject("error")
+                extractedMessage = errObj.optString("message", "")
+                extractedStatus = errObj.optString("status", "")
+            } else if (jsonObj.has("message")) {
+                extractedMessage = jsonObj.optString("message", "")
+                extractedStatus = jsonObj.optString("status", "")
+            } else {
+                extractedMessage = errorBody
+            }
+        } catch (e: Exception) {
+            extractedMessage = errorBody
+        }
+
+        val lowerMsg = extractedMessage.lowercase()
+
+        return when (code) {
+            401, 403 -> {
+                when {
+                    lowerMsg.contains("api key") || lowerMsg.contains("invalid_key") || lowerMsg.contains("key_expired") || lowerMsg.contains("service_disabled") -> {
+                        Pair(
+                            "Gemini 金鑰失效 (403) 🔒",
+                            "代理伺服器或 Gemini API 金鑰無效、過期或已停用。\n詳細回應: ${extractedMessage.take(200)}"
+                        )
+                    }
+                    lowerMsg.contains("unauthorized") || lowerMsg.contains("token") || lowerMsg.contains("auth") || lowerMsg.contains("unauthenticated") -> {
+                        Pair(
+                            "身份驗證失敗 (403) 🔒",
+                            "使用者 Firebase Auth Token 無效或無存取權限。\n詳細回應: ${extractedMessage.take(200)}"
+                        )
+                    }
+                    lowerMsg.contains("quota") || lowerMsg.contains("billing") || lowerMsg.contains("permission_denied") -> {
+                        Pair(
+                            "帳戶權限/額度不足 (403) ⛔",
+                            "Gemini API 帳戶權限不足或專案額度受限。\n詳細回應: ${extractedMessage.take(200)}"
+                        )
+                    }
+                    else -> {
+                        Pair(
+                            "存取被拒 (403) 🔒",
+                            "請求遭伺服器拒絕 (HTTP 403)。\n詳細回應: ${extractedMessage.take(200)}"
+                        )
+                    }
+                }
+            }
+            429 -> {
+                Pair(
+                    "呼叫額度上限 (429) ⚠️",
+                    "API 呼叫頻率或每分鐘/每日額度已達上限 (HTTP 429)，請稍候 1~2 分鐘後重試。\n詳細回應: ${extractedMessage.take(200)}"
+                )
+            }
+            else -> {
+                Pair(
+                    "伺服器錯誤 ($code) ❌",
+                    "HTTP $code: ${extractedMessage.take(200)}"
+                )
+            }
+        }
+    }
+
+    suspend fun translateWord(word: String, contextSentence: String): VocabDetail? {
         val cleanedWord = word.trim()
             .replace(Regex("[^a-zA-Z-\\s]"), "")
             .replace(Regex("\\s+"), " ")
@@ -272,6 +355,12 @@ object VocabTranslationHelper {
             )
         )
 
+        val apiKey = BuildConfig.GEMINI_API_KEY
+        val hasKey = apiKey.isNotEmpty() && apiKey != "MY_GEMINI_API_KEY"
+
+        // Fetch Firebase Auth ID token for secure server gateway verification
+        val idToken = fetchFirebaseIdToken()
+
         // Exponential backoff retry loop (max 3 attempts for 429/503)
         var maxAttempts = 3
         var currentAttempt = 0
@@ -283,28 +372,46 @@ object VocabTranslationHelper {
                 val response = if (ProxyGatewayConfig.isEnabled) {
                     try {
                         val url = if (ProxyGatewayConfig.proxyBaseUrl.endsWith("/")) {
-                            ProxyGatewayConfig.proxyBaseUrl + "v1beta/models/gemini-2.5-flash:generateContent"
+                            ProxyGatewayConfig.proxyBaseUrl + "v1beta/models/gemini-2.0-flash:generateContent"
                         } else {
-                            ProxyGatewayConfig.proxyBaseUrl + "/v1beta/models/gemini-2.5-flash:generateContent"
+                            ProxyGatewayConfig.proxyBaseUrl + "/v1beta/models/gemini-2.0-flash:generateContent"
                         }
                         
                         val headers = mutableMapOf<String, String>()
+                        if (!idToken.isNullOrBlank()) {
+                            headers["Authorization"] = "Bearer $idToken"
+                        }
                         if (ProxyGatewayConfig.customHeaderKey.isNotBlank() && ProxyGatewayConfig.customHeaderValue.isNotBlank()) {
                             headers[ProxyGatewayConfig.customHeaderKey] = ProxyGatewayConfig.customHeaderValue
                         }
                         
-                        Log.d("VocabTranslation", "Calling proxy gateway (Attempt $currentAttempt) url: $url")
+                        val maskedHeaders = headers.mapValues { (k, v) ->
+                            if (k.equals("Authorization", ignoreCase = true) && v.length > 15) {
+                                v.take(15) + "...[len ${v.length}]"
+                            } else {
+                                v
+                            }
+                        }
+                        Log.d("VocabTranslation", "Calling secure proxy gateway (Attempt $currentAttempt) URL: $url | Headers: $maskedHeaders")
                         GeminiClient.api.generateContentProxy(url, headers, request)
                     } catch (proxyEx: Exception) {
                         if (hasKey) {
-                            Log.w("VocabTranslation", "Proxy failed, falling back to direct Gemini API with key", proxyEx)
+                            Log.w("VocabTranslation", "Proxy gateway request failed, falling back to direct Gemini API using BuildConfig.GEMINI_API_KEY from Secrets", proxyEx)
                             GeminiClient.api.generateContent(apiKey, request)
                         } else {
                             throw proxyEx
                         }
                     }
-                } else {
+                } else if (hasKey) {
+                    Log.d("VocabTranslation", "Calling direct Gemini API using BuildConfig.GEMINI_API_KEY from Secrets")
                     GeminiClient.api.generateContent(apiKey, request)
+                } else {
+                    return VocabDetail(
+                        word = cleanedWord,
+                        translation = "請設定 Gemini API 金鑰 🔒",
+                        definition = "系統未偵測到有效的 GEMINI_API_KEY。請至 AI Studio [Secrets] 面板設定 GEMINI_API_KEY。",
+                        phonetic = ""
+                    )
                 }
 
                 val jsonText = response.candidates?.firstOrNull()?.content?.parts?.firstOrNull()?.text
@@ -327,27 +434,21 @@ object VocabTranslationHelper {
             } catch (e: retrofit2.HttpException) {
                 lastException = e
                 val code = e.code()
-                Log.e("VocabTranslation", "HTTP Error during translation attempt $currentAttempt: $code", e)
+                val errorBody = e.response()?.errorBody()?.string()
+                Log.e("VocabTranslation", "HTTP $code Error Body from Worker/Gemini (Attempt $currentAttempt): $errorBody", e)
+
                 if ((code == 429 || code == 503) && currentAttempt < maxAttempts) {
                     val backoffTimeMs = (1000L * (1 shl (currentAttempt - 1))) + (kotlin.random.Random.nextLong(100, 500))
                     Log.d("VocabTranslation", "Rate limited ($code), retrying in ${backoffTimeMs}ms...")
                     kotlinx.coroutines.delay(backoffTimeMs)
                 } else {
-                    if (code == 429) {
-                        return VocabDetail(
-                            word = cleanedWord,
-                            translation = "金鑰額度已達上限 (HTTP 429) ⚠️",
-                            definition = "Gemini API 回傳了 Too Many Requests (429) 錯誤。這表示該 API 的呼叫頻率或額度已達到每分鐘/每日的上限，請稍候幾分鐘再試。",
-                            phonetic = ""
-                        )
-                    } else {
-                        return VocabDetail(
-                            word = cleanedWord,
-                            translation = "伺服器回傳錯誤 ($code) ❌",
-                            definition = "Gemini API 呼叫失敗，狀態碼為 $code。這可能是伺服器連線問題，請稍後重試或聯絡開發人員。",
-                            phonetic = ""
-                        )
-                    }
+                    val (title, detailMsg) = parseHttpErrorDetails(code, errorBody)
+                    return VocabDetail(
+                        word = cleanedWord,
+                        translation = title,
+                        definition = detailMsg,
+                        phonetic = ""
+                    )
                 }
             } catch (e: Exception) {
                 lastException = e
@@ -359,7 +460,7 @@ object VocabTranslationHelper {
                     return VocabDetail(
                         word = cleanedWord,
                         translation = "連線失敗 📡",
-                        definition = "發生異常連線錯誤，請檢查您的網路連線。\n詳細日誌: ${e.localizedMessage ?: e.toString()}",
+                        definition = "發生異常連線錯誤，請檢查您的網路連線。",
                         phonetic = ""
                     )
                 }
@@ -369,7 +470,7 @@ object VocabTranslationHelper {
         return VocabDetail(
             word = cleanedWord,
             translation = "連線失敗 📡",
-            definition = "超過重試次數，請稍後重試。\n詳細日誌: ${lastException?.localizedMessage ?: lastException?.toString()}",
+            definition = "超過重試次數，請稍後重試。",
             phonetic = ""
         )
     }
