@@ -511,9 +511,9 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
             val idToken = com.example.network.VocabTranslationHelper.fetchFirebaseIdToken()
             val geminiResponse = withContext(Dispatchers.IO) {
                 val proxyUrl = if (com.example.network.ProxyGatewayConfig.proxyBaseUrl.endsWith("/")) {
-                    com.example.network.ProxyGatewayConfig.proxyBaseUrl + "v1beta/models/gemini-2.0-flash:generateContent"
+                    com.example.network.ProxyGatewayConfig.proxyBaseUrl + "v1beta/models/gemini-1.5-flash:generateContent"
                 } else {
-                    com.example.network.ProxyGatewayConfig.proxyBaseUrl + "/v1beta/models/gemini-2.0-flash:generateContent"
+                    com.example.network.ProxyGatewayConfig.proxyBaseUrl + "/v1beta/models/gemini-1.5-flash:generateContent"
                 }
                 
                 val headers = mutableMapOf<String, String>()
