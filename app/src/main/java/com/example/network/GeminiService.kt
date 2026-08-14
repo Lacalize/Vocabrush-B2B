@@ -64,7 +64,7 @@ data class VocabDetail(
 )
 
 interface GeminiApi {
-    @POST("v1beta/models/gemini-1.5-flash:generateContent")
+    @POST("v1beta/models/gemini-3.5-flash-lite:generateContent")
     suspend fun generateContent(
         @Query("key") apiKey: String,
         @Body request: GeminiRequest
@@ -372,9 +372,9 @@ object VocabTranslationHelper {
                 val response = if (ProxyGatewayConfig.isEnabled) {
                     try {
                         val url = if (ProxyGatewayConfig.proxyBaseUrl.endsWith("/")) {
-                            ProxyGatewayConfig.proxyBaseUrl + "v1beta/models/gemini-1.5-flash:generateContent"
+                            ProxyGatewayConfig.proxyBaseUrl + "v1beta/models/gemini-3.5-flash-lite:generateContent"
                         } else {
-                            ProxyGatewayConfig.proxyBaseUrl + "/v1beta/models/gemini-1.5-flash:generateContent"
+                            ProxyGatewayConfig.proxyBaseUrl + "/v1beta/models/gemini-3.5-flash-lite:generateContent"
                         }
                         
                         val headers = mutableMapOf<String, String>()

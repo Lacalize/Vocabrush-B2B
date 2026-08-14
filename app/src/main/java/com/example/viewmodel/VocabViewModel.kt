@@ -413,26 +413,49 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun generateAndCacheNewsForCategory(category: String, todayString: String) {
-        // 1. Fetch raw news from GNews API
-        val apiKey = com.example.BuildConfig.GNEWS_API_KEY
-        val url = "https://gnews.io/api/v4/top-headlines?category=$category&lang=en&country=us&apikey=$apiKey"
-        
-        val gnewsResponse = withContext(Dispatchers.IO) {
-            try {
-                com.example.network.NewsClient.api.fetchNewsByUrl(url)
-            } catch (e: Exception) {
-                null
+        // 1. Fetch raw news from RSS Feeds (Primary) or GNews API (Secondary / Fallback)
+        var sourceLabel = "RSS Feeds"
+        var headlinesList: List<String> = emptyList()
+
+        if (com.example.network.NewsSourceConfig.activeProvider == com.example.network.NewsSourceProvider.RSS_FEED ||
+            com.example.network.NewsSourceConfig.activeProvider == com.example.network.NewsSourceProvider.HYBRID_AUTO) {
+            val rssItems = com.example.network.RssFeedService.fetchHeadlines(category, maxCount = 8)
+            if (rssItems.isNotEmpty()) {
+                sourceLabel = "Live RSS Feeds"
+                headlinesList = rssItems.mapIndexed { idx, art ->
+                    "${idx + 1}. [${art.sourceName}] Title: ${art.title}\nDescription: ${art.description}"
+                }
+            }
+        }
+
+        // Fallback to GNews API if RSS returned empty or if provider is explicitly set to GNEWS_API
+        if (headlinesList.isEmpty() && 
+            (com.example.network.NewsSourceConfig.activeProvider == com.example.network.NewsSourceProvider.GNEWS_API ||
+             com.example.network.NewsSourceConfig.activeProvider == com.example.network.NewsSourceProvider.HYBRID_AUTO)) {
+            val apiKey = com.example.BuildConfig.GNEWS_API_KEY
+            val url = "https://gnews.io/api/v4/top-headlines?category=$category&lang=en&country=us&apikey=$apiKey"
+            
+            val gnewsResponse = withContext(Dispatchers.IO) {
+                try {
+                    com.example.network.NewsClient.api.fetchNewsByUrl(url)
+                } catch (e: Exception) {
+                    null
+                }
+            }
+
+            val gnewsArticles = gnewsResponse?.articles?.take(8)
+            if (!gnewsArticles.isNullOrEmpty()) {
+                sourceLabel = "GNews API"
+                headlinesList = gnewsArticles.mapIndexed { idx, art ->
+                    "${idx + 1}. Title: ${art.title ?: ""}\nDescription: ${art.description ?: ""}"
+                }
             }
         }
 
         // 2. Prepare the prompt for Gemini to generate 3 difficulty levels
-        val headlinesList = gnewsResponse?.articles?.take(8)?.mapIndexed { idx, art ->
-            "${idx + 1}. Title: ${art.title ?: ""}\nDescription: ${art.description ?: ""}"
-        } ?: emptyList()
-
         val prompt = if (headlinesList.isNotEmpty()) {
             """
-                We have retrieved some latest real-time news headlines/topics from GNews API for the category "$category":
+                We have retrieved the latest real-time news headlines/topics from $sourceLabel for the category "$category":
                 
                 ${headlinesList.joinToString("\n\n")}
                 
@@ -465,7 +488,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
             """.trimIndent()
         } else {
             """
-                We were unable to retrieve the latest news headlines from GNews.
+                We were unable to retrieve external headlines.
                 Please select 5 current, hot, and highly relevant educational topics in the category "$category" (e.g., if technology: AI, Space exploration, clean energy, etc.).
                 Based on these topics, write exactly 5 high-quality, engaging, full-length articles in English suitable for ESL vocabulary learning.
                 For EACH topic, you MUST write three distinct versions of the article:
@@ -511,9 +534,9 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
             val idToken = com.example.network.VocabTranslationHelper.fetchFirebaseIdToken()
             val geminiResponse = withContext(Dispatchers.IO) {
                 val proxyUrl = if (com.example.network.ProxyGatewayConfig.proxyBaseUrl.endsWith("/")) {
-                    com.example.network.ProxyGatewayConfig.proxyBaseUrl + "v1beta/models/gemini-1.5-flash:generateContent"
+                    com.example.network.ProxyGatewayConfig.proxyBaseUrl + "v1beta/models/gemini-3.5-flash-lite:generateContent"
                 } else {
-                    com.example.network.ProxyGatewayConfig.proxyBaseUrl + "/v1beta/models/gemini-1.5-flash:generateContent"
+                    com.example.network.ProxyGatewayConfig.proxyBaseUrl + "/v1beta/models/gemini-3.5-flash-lite:generateContent"
                 }
                 
                 val headers = mutableMapOf<String, String>()
