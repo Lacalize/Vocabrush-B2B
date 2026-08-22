@@ -772,6 +772,16 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                 repository.updateUser(updated)
             }
             currentUser = updated
+
+            // Sync vocabLevel directly to Firestore users/{uid}
+            val uid = auth?.currentUser?.uid ?: user.uid
+            if (uid.isNotBlank() && firestore != null) {
+                firestore?.collection("users")?.document(uid)?.set(
+                    mapOf("vocabLevel" to level),
+                    SetOptions.merge()
+                )
+            }
+
             // After level test, guide user directly into spotlight onboarding tutorial
             if (!hasCompletedOnboarding) {
                 onboardingStep = 0
@@ -784,13 +794,58 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
 
     // User session flows helper functions
     fun loadLoggedInUser() {
-        val email = sharedPrefs.getString("logged_in_email", null)
-        if (email != null) {
-            viewModelScope.launch {
-                val user = withContext(Dispatchers.IO) {
-                    repository.getUserByEmail(email)
+        val authUser = auth?.currentUser
+        if (authUser != null) {
+            val uid = authUser.uid
+            val db = firestore
+            if (db != null) {
+                db.collection("users").document(uid).get()
+                    .addOnSuccessListener { doc ->
+                        if (doc != null && doc.exists()) {
+                            val user = User(
+                                uid = uid,
+                                email = doc.getString("email") ?: (authUser.email ?: ""),
+                                name = doc.getString("name") ?: (authUser.displayName ?: (authUser.email?.substringBefore("@") ?: "學習者")),
+                                authProvider = doc.getString("authProvider") ?: "PASSWORD",
+                                avatarColorHex = doc.getString("avatarColorHex") ?: "#6200EE",
+                                vocabGoal = doc.getLong("vocabGoal")?.toInt() ?: 30,
+                                vocabLevel = doc.getString("vocabLevel") ?: "PENDING",
+                                role = doc.getString("role") ?: "",
+                                classId = doc.getString("classId") ?: "",
+                                preferredCategory = doc.getString("preferredCategory") ?: "technology",
+                                totalUsageTimeSeconds = doc.getLong("totalUsageTimeSeconds") ?: 0L
+                            )
+                            viewModelScope.launch {
+                                withContext(Dispatchers.IO) { repository.insertUser(user) }
+                                currentUser = user
+                                if (!user.classId.isNullOrBlank()) {
+                                    studentClassId = user.classId
+                                    sharedPrefs.edit().putString("firebase_class_id", user.classId).apply()
+                                    listenToAssignments(user.classId)
+                                }
+                            }
+                        } else {
+                            viewModelScope.launch {
+                                val cached = withContext(Dispatchers.IO) { repository.getUserByUid(uid) }
+                                currentUser = cached ?: User(
+                                    uid = uid,
+                                    email = authUser.email ?: "",
+                                    name = authUser.displayName ?: (authUser.email?.substringBefore("@") ?: "學習者")
+                                )
+                            }
+                        }
+                    }
+                    .addOnFailureListener {
+                        viewModelScope.launch {
+                            val cached = withContext(Dispatchers.IO) { repository.getUserByUid(uid) }
+                            currentUser = cached
+                        }
+                    }
+            } else {
+                viewModelScope.launch {
+                    val cached = withContext(Dispatchers.IO) { repository.getUserByUid(uid) }
+                    currentUser = cached
                 }
-                currentUser = user
             }
         } else {
             currentUser = null
@@ -798,7 +853,13 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun logoutUser() {
-        sharedPrefs.edit().remove("logged_in_email").apply()
+        try {
+            auth?.signOut()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        sharedPrefs.edit().remove("logged_in_uid").remove("logged_in_email").remove("firebase_class_id").apply()
+        leaveClass()
         currentUser = null
         currentTab = 0
         activeSubTab = 0
@@ -808,86 +869,240 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun registerUser(email: String, name: String, passwordRaw: String, onResult: (Boolean, String) -> Unit) {
-        if (email.isBlank() || name.isBlank() || passwordRaw.isBlank()) {
-            onResult(false, "資料欄位不得為空！")
+        val cleanEmail = email.trim().lowercase()
+        val cleanName = name.trim()
+        if (cleanEmail.isBlank() || cleanName.isBlank() || passwordRaw.isBlank()) {
+            onResult(false, "請完整填寫信箱、姓名與密碼！")
             return
         }
-        viewModelScope.launch {
-            val existing = withContext(Dispatchers.IO) { repository.getUserByEmail(email.trim().lowercase()) }
-            if (existing != null) {
-                onResult(false, "此信箱帳號已建立，請直接登入。")
-                return@launch
-            }
-            val passHash = passwordRaw.hashCode().toString()
-            val newUser = User(
-                email = email.trim().lowercase(),
-                name = name.trim(),
-                passwordHash = passHash,
-                authProvider = "CUSTOM"
-            )
-            withContext(Dispatchers.IO) {
-                repository.insertUser(newUser)
-            }
-            sharedPrefs.edit().putString("logged_in_email", email.trim().lowercase()).apply()
-            loadLoggedInUser()
-            onResult(true, "註冊成功！")
+        if (passwordRaw.length < 6) {
+            onResult(false, "密碼長度至少需 6 個字元！")
+            return
         }
+        val authObj = auth
+        if (authObj == null) {
+            onResult(false, "Firebase 驗證模組初始化失敗，請檢查網路連線。")
+            return
+        }
+
+        authObj.createUserWithEmailAndPassword(cleanEmail, passwordRaw)
+            .addOnSuccessListener { authResult ->
+                val uid = authResult.user?.uid
+                if (uid == null) {
+                    onResult(false, "建立帳戶失敗，未取得有效身分 UID。")
+                    return@addOnSuccessListener
+                }
+
+                val profileData = hashMapOf<String, Any>(
+                    "name" to cleanName,
+                    "email" to cleanEmail,
+                    "vocabGoal" to 30,
+                    "vocabLevel" to "PENDING",
+                    "authProvider" to "PASSWORD",
+                    "avatarColorHex" to "#6200EE",
+                    "totalUsageTimeSeconds" to 0L,
+                    "createdAt" to com.google.firebase.firestore.FieldValue.serverTimestamp()
+                )
+
+                val user = User(
+                    uid = uid,
+                    email = cleanEmail,
+                    name = cleanName,
+                    authProvider = "PASSWORD",
+                    avatarColorHex = "#6200EE",
+                    vocabGoal = 30,
+                    vocabLevel = "PENDING",
+                    role = "",
+                    classId = "",
+                    totalUsageTimeSeconds = 0L
+                )
+
+                val db = firestore
+                if (db != null) {
+                    db.collection("users").document(uid)
+                        .set(profileData, SetOptions.merge())
+                        .addOnSuccessListener {
+                            viewModelScope.launch {
+                                withContext(Dispatchers.IO) { repository.insertUser(user) }
+                                currentUser = user
+                                sharedPrefs.edit().putString("logged_in_uid", uid).apply()
+                                onResult(true, "註冊成功！")
+                            }
+                        }
+                        .addOnFailureListener {
+                            viewModelScope.launch {
+                                withContext(Dispatchers.IO) { repository.insertUser(user) }
+                                currentUser = user
+                                sharedPrefs.edit().putString("logged_in_uid", uid).apply()
+                                onResult(true, "註冊成功！")
+                            }
+                        }
+                } else {
+                    viewModelScope.launch {
+                        withContext(Dispatchers.IO) { repository.insertUser(user) }
+                        currentUser = user
+                        sharedPrefs.edit().putString("logged_in_uid", uid).apply()
+                        onResult(true, "註冊成功！")
+                    }
+                }
+            }
+            .addOnFailureListener { e ->
+                val msg = when {
+                    e.message?.contains("The email address is already in use", ignoreCase = true) == true ->
+                        "此信箱已被註冊，請直接切換至登入分頁！"
+                    e.message?.contains("badly formatted", ignoreCase = true) == true ->
+                        "電子郵件格式不正確，請檢查輸入！"
+                    e.message?.contains("Password should be at least", ignoreCase = true) == true ->
+                        "密碼強度不足，長度至少需 6 碼！"
+                    else -> "註冊失敗：${e.localizedMessage ?: "請檢查網路連線"}"
+                }
+                onResult(false, msg)
+            }
     }
 
     fun loginUser(email: String, passwordRaw: String, onResult: (Boolean, String) -> Unit) {
-        if (email.isBlank() || passwordRaw.isBlank()) {
+        val cleanEmail = email.trim().lowercase()
+        if (cleanEmail.isBlank() || passwordRaw.isBlank()) {
             onResult(false, "電子郵件與密碼不得為空！")
             return
         }
-        viewModelScope.launch {
-            val user = withContext(Dispatchers.IO) { repository.getUserByEmail(email.trim().lowercase()) }
-            if (user == null) {
-                onResult(false, "此信箱帳號尚未註冊過。")
-                return@launch
-            }
-            if (user.authProvider == "GOOGLE") {
-                onResult(false, "此帳號是以 Google 授權登入，請點擊 Google 登入按鈕類型。")
-                return@launch
-            }
-            val passHash = passwordRaw.hashCode().toString()
-            if (user.passwordHash == passHash) {
-                val updatedUser = user.copy(loginCount = user.loginCount + 1)
-                withContext(Dispatchers.IO) { repository.updateUser(updatedUser) }
-                sharedPrefs.edit().putString("logged_in_email", email.trim().lowercase()).apply()
-                loadLoggedInUser()
-                onResult(true, "登入成功！")
-            } else {
-                onResult(false, "認證失敗，輸入的密碼不正確！")
-            }
+        val authObj = auth
+        if (authObj == null) {
+            onResult(false, "Firebase 驗證模組尚未啟動，請檢查網路連線。")
+            return
         }
+
+        authObj.signInWithEmailAndPassword(cleanEmail, passwordRaw)
+            .addOnSuccessListener { authResult ->
+                val uid = authResult.user?.uid
+                if (uid == null) {
+                    onResult(false, "登入失敗，無效之使用者身分。")
+                    return@addOnSuccessListener
+                }
+                sharedPrefs.edit().putString("logged_in_uid", uid).apply()
+                val db = firestore
+                if (db != null) {
+                    db.collection("users").document(uid).get()
+                        .addOnSuccessListener { doc ->
+                            val user = if (doc != null && doc.exists()) {
+                                User(
+                                    uid = uid,
+                                    email = doc.getString("email") ?: cleanEmail,
+                                    name = doc.getString("name") ?: cleanEmail.substringBefore("@"),
+                                    authProvider = doc.getString("authProvider") ?: "PASSWORD",
+                                    avatarColorHex = doc.getString("avatarColorHex") ?: "#6200EE",
+                                    vocabGoal = doc.getLong("vocabGoal")?.toInt() ?: 30,
+                                    vocabLevel = doc.getString("vocabLevel") ?: "PENDING",
+                                    role = doc.getString("role") ?: "",
+                                    classId = doc.getString("classId") ?: "",
+                                    preferredCategory = doc.getString("preferredCategory") ?: "technology",
+                                    totalUsageTimeSeconds = doc.getLong("totalUsageTimeSeconds") ?: 0L
+                                )
+                            } else {
+                                User(
+                                    uid = uid,
+                                    email = cleanEmail,
+                                    name = cleanEmail.substringBefore("@"),
+                                    authProvider = "PASSWORD",
+                                    vocabGoal = 30,
+                                    vocabLevel = "PENDING"
+                                )
+                            }
+                            viewModelScope.launch {
+                                withContext(Dispatchers.IO) { repository.insertUser(user) }
+                                currentUser = user
+                                if (!user.classId.isNullOrBlank()) {
+                                    studentClassId = user.classId
+                                    sharedPrefs.edit().putString("firebase_class_id", user.classId).apply()
+                                    listenToAssignments(user.classId)
+                                }
+                                onResult(true, "登入成功！")
+                            }
+                        }
+                        .addOnFailureListener {
+                            viewModelScope.launch {
+                                val cached = withContext(Dispatchers.IO) { repository.getUserByUid(uid) }
+                                currentUser = cached ?: User(
+                                    uid = uid,
+                                    email = cleanEmail,
+                                    name = cleanEmail.substringBefore("@"),
+                                    authProvider = "PASSWORD"
+                                )
+                                onResult(true, "登入成功！")
+                            }
+                        }
+                } else {
+                    viewModelScope.launch {
+                        val cached = withContext(Dispatchers.IO) { repository.getUserByUid(uid) }
+                        currentUser = cached ?: User(
+                            uid = uid,
+                            email = cleanEmail,
+                            name = cleanEmail.substringBefore("@"),
+                            authProvider = "PASSWORD"
+                        )
+                        onResult(true, "登入成功！")
+                    }
+                }
+            }
+            .addOnFailureListener { e ->
+                val msg = when {
+                    e.message?.contains("no user record", ignoreCase = true) == true ||
+                    e.message?.contains("user-not-found", ignoreCase = true) == true ->
+                        "找不到此信箱帳號，請先切換至註冊分頁建立新帳號！"
+                    e.message?.contains("wrong-password", ignoreCase = true) == true ||
+                    e.message?.contains("invalid-credential", ignoreCase = true) == true ||
+                    e.message?.contains("INVALID_LOGIN_CREDENTIALS", ignoreCase = true) == true ->
+                        "帳號或密碼輸入不正確，請重新檢查！"
+                    e.message?.contains("badly formatted", ignoreCase = true) == true ->
+                        "電子郵件格式不正確！"
+                    else -> "登入失敗：${e.localizedMessage ?: "請檢查網路連線"}"
+                }
+                onResult(false, msg)
+            }
     }
 
     fun loginWithGoogle(email: String, name: String, onResult: (Boolean, String) -> Unit) {
-        if (email.isBlank()) {
+        val cleanEmail = email.trim().lowercase()
+        if (cleanEmail.isBlank()) {
             onResult(false, "Google 連線資料異常。")
             return
         }
-        viewModelScope.launch {
-            val existing = withContext(Dispatchers.IO) { repository.getUserByEmail(email.trim().lowercase()) }
-            if (existing == null) {
-                val newUser = User(
-                    email = email.trim().lowercase(),
-                    name = name.trim().ifBlank { email.substringBefore("@") },
-                    authProvider = "GOOGLE",
-                    avatarColorHex = "#4285F4", // Google brand blue color code
-                    loginCount = 1
-                )
-                withContext(Dispatchers.IO) {
-                    repository.insertUser(newUser)
-                }
-            } else {
-                val updatedUser = existing.copy(loginCount = existing.loginCount + 1)
-                withContext(Dispatchers.IO) { repository.updateUser(updatedUser) }
-            }
-            sharedPrefs.edit().putString("logged_in_email", email.trim().lowercase()).apply()
-            loadLoggedInUser()
-            onResult(true, "Google 授權登入成功！")
+        val authObj = auth
+        if (authObj == null) {
+            onResult(false, "Firebase 驗證模組尚未啟動")
+            return
         }
+        val defaultGooglePass = "GoogleAuth@2026"
+        authObj.signInWithEmailAndPassword(cleanEmail, defaultGooglePass)
+            .addOnSuccessListener { result ->
+                val uid = result.user?.uid ?: return@addOnSuccessListener
+                sharedPrefs.edit().putString("logged_in_uid", uid).apply()
+                loadLoggedInUser()
+                onResult(true, "Google 授權登入成功！")
+            }
+            .addOnFailureListener {
+                authObj.createUserWithEmailAndPassword(cleanEmail, defaultGooglePass)
+                    .addOnSuccessListener { result ->
+                        val uid = result.user?.uid ?: return@addOnSuccessListener
+                        val profileData = hashMapOf<String, Any>(
+                            "name" to name.trim().ifBlank { cleanEmail.substringBefore("@") },
+                            "email" to cleanEmail,
+                            "vocabGoal" to 30,
+                            "vocabLevel" to "PENDING",
+                            "authProvider" to "GOOGLE",
+                            "avatarColorHex" to "#4285F4",
+                            "totalUsageTimeSeconds" to 0L,
+                            "createdAt" to com.google.firebase.firestore.FieldValue.serverTimestamp()
+                        )
+                        firestore?.collection("users")?.document(uid)?.set(profileData, SetOptions.merge())
+                        sharedPrefs.edit().putString("logged_in_uid", uid).apply()
+                        loadLoggedInUser()
+                        onResult(true, "Google 授權登入成功！")
+                    }
+                    .addOnFailureListener { err ->
+                        onResult(false, "Google 授權登入失敗：${err.localizedMessage}")
+                    }
+            }
     }
 
     fun updateUserProfile(name: String, vocabGoal: Int, preferredCategory: String, avatarColorHex: String) {
@@ -903,6 +1118,20 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                 repository.updateUser(updated)
             }
             currentUser = updated
+
+            // Sync updated profile to Firestore users/{uid}
+            val uid = auth?.currentUser?.uid ?: user.uid
+            if (uid.isNotBlank() && firestore != null) {
+                firestore?.collection("users")?.document(uid)?.set(
+                    mapOf(
+                        "name" to updated.name,
+                        "vocabGoal" to updated.vocabGoal,
+                        "preferredCategory" to updated.preferredCategory,
+                        "avatarColorHex" to updated.avatarColorHex
+                    ),
+                    SetOptions.merge()
+                )
+            }
         }
     }
 
@@ -1120,33 +1349,15 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Resolves a real Firebase Auth uid (signing in anonymously if needed) and hands it to [onReady].
-     * IMPORTANT: unlike the previous implementation, this no longer falls back to a locally generated
-     * device UUID when Firebase Auth is unavailable. A fake local UUID never matches request.auth.uid
-     * in firestore.rules (isOwner()/isClassMember() both compare against request.auth.uid), so any
-     * Firestore read/write attempted with that fake id would always be denied anyway — it only made
-     * failures happen later and look confusing (e.g. "why did the class code silently not save?").
-     * Callers now receive null and must handle "not authenticated" explicitly.
+     * Resolves a real Firebase Auth uid and hands it to [onReady].
+     * Reads directly from FirebaseAuth.currentUser. If not authenticated, hands null.
      */
     private fun ensureFirebaseAuth(onReady: (uid: String?) -> Unit) {
         val authObj = auth
-        if (authObj == null) {
-            onReady(null)
-            return
-        }
-
-        val current = authObj.currentUser
+        val current = authObj?.currentUser
         if (current != null) {
             onReady(current.uid)
-            return
-        }
-
-        try {
-            authObj.signInAnonymously()
-                .addOnSuccessListener { authResult -> onReady(authResult.user?.uid) }
-                .addOnFailureListener { onReady(null) }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } else {
             onReady(null)
         }
     }

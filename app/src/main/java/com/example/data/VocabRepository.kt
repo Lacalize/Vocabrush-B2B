@@ -50,6 +50,7 @@ class VocabRepository(
         vocabDao.deleteOldCloudCachedNews(dateString)
 
     // User operations
+    suspend fun getUserByUid(uid: String): User? = userDao.getUserByUid(uid)
     suspend fun getUserByEmail(email: String): User? = userDao.getUserByEmail(email)
     suspend fun insertUser(user: User): Long = userDao.insertUser(user)
     suspend fun updateUser(user: User) = userDao.updateUser(user)

@@ -10,22 +10,27 @@ import androidx.room.Query
 
 @Entity(tableName = "users")
 data class User(
-    @PrimaryKey val email: String,
-    val name: String,
-    val passwordHash: String = "", // Used for customize native accounts, empty for Google
-    val avatarColorHex: String = "#6200EE", // Custom profile colors setup
-    val authProvider: String = "CUSTOM", // "CUSTOM" or "GOOGLE"
+    @PrimaryKey val uid: String = "",
+    val email: String = "",
+    val name: String = "",
+    val passwordHash: String = "",
+    val avatarColorHex: String = "#6200EE",
+    val authProvider: String = "PASSWORD", // "PASSWORD" or "GOOGLE"
     val registrationDate: Long = System.currentTimeMillis(),
-    val vocabGoal: Int = 10, // Daily standard objective/goal
-    val preferredCategory: String = "technology", // Selected learning focus
+    val vocabGoal: Int = 30, // Default 30 aligned with PWA
+    val preferredCategory: String = "technology",
     val vocabLevel: String = "PENDING", // "PENDING", "EASY", "MEDIUM", "HARD"
-    val role: String = "student", // "student", "teacher", "admin"
+    val role: String = "", // empty or "teacher" / "admin"
+    val classId: String = "",
     val loginCount: Int = 1,
     val totalUsageTimeSeconds: Long = 0
 )
 
 @Dao
 interface UserDao {
+    @Query("SELECT * FROM users WHERE uid = :uid LIMIT 1")
+    suspend fun getUserByUid(uid: String): User?
+
     @Query("SELECT * FROM users WHERE email = :email LIMIT 1")
     suspend fun getUserByEmail(email: String): User?
 
