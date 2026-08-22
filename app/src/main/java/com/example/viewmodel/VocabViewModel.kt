@@ -94,7 +94,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
     var hasCompletedOnboarding by mutableStateOf(sharedPrefs.getBoolean("has_completed_onboarding", false))
         private set
 
-    var showOnboardingOverlay by mutableStateOf(!sharedPrefs.getBoolean("has_completed_onboarding", false))
+    var showOnboardingOverlay by mutableStateOf(false)
     var onboardingStep by mutableStateOf(0) // 0: Set Goal, 1: News CTA, 2: Custom Text CTA, 3: Flashcard Review, 4: Profile Stats
     var activeSubTab by mutableStateOf(0) // 0 = 即時新聞, 1 = 貼上/自訂教材
 
@@ -772,6 +772,11 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                 repository.updateUser(updated)
             }
             currentUser = updated
+            // After level test, guide user directly into spotlight onboarding tutorial
+            if (!hasCompletedOnboarding) {
+                onboardingStep = 0
+                showOnboardingOverlay = true
+            }
             // Re-trigger news loading / generation under the newly set placement level
             triggerDailyInitCheck()
         }
@@ -795,6 +800,11 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
     fun logoutUser() {
         sharedPrefs.edit().remove("logged_in_email").apply()
         currentUser = null
+        currentTab = 0
+        activeSubTab = 0
+        isReadingModeActive = false
+        isReviewModeActive = false
+        showOnboardingOverlay = false
     }
 
     fun registerUser(email: String, name: String, passwordRaw: String, onResult: (Boolean, String) -> Unit) {

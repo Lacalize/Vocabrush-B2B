@@ -212,7 +212,8 @@ fun VocabBrushApp() {
             .navigationBarsPadding(),
         bottomBar = {
             val user = viewModel.currentUser
-            if (user == null || user.vocabLevel != "PENDING") {
+            // Only show bottom navigation bar when user is logged in and not in pending placement test
+            if (user != null && user.vocabLevel != "PENDING") {
                 if (!viewModel.isReadingModeActive) { // Hide the bottom tab menu completely when active reading mode is turned on for immersive feel!
                     NavigationBar(
                         modifier = Modifier.fillMaxWidth(),
@@ -268,9 +269,14 @@ fun VocabBrushApp() {
                 )
         ) {
             val user = viewModel.currentUser
-            if (user != null && user.vocabLevel == "PENDING") {
+            if (user == null) {
+                // Step 1: Login / Register Screen for first-time / non-authenticated users
+                ProfileScreen(viewModel = viewModel)
+            } else if (user.vocabLevel == "PENDING") {
+                // Step 2: Vocabulary Capability / Placement Test Screen
                 VocabCapabilityTestScreen(viewModel = viewModel)
             } else {
+                // Step 4: Main Application Pages (Reader, Vocab Book, Profile Dashboard)
                 when (viewModel.currentTab) {
                     0 -> {
                         if (viewModel.isReadingModeActive) {
@@ -290,6 +296,7 @@ fun VocabBrushApp() {
                 ReviewSessionScreen(viewModel = viewModel)
             }
 
+            // Step 3: Spotlight Onboarding Tour & Goal Setting Overlay (shown after placement test)
             if (viewModel.isDailyInitLoading) {
                 DailyInitLoadingScreen(viewModel = viewModel)
             } else if (viewModel.showOnboardingOverlay) {
