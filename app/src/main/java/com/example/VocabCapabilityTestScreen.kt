@@ -16,6 +16,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.foundation.Image
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -168,9 +171,29 @@ fun VocabCapabilityTestScreen(viewModel: VocabViewModel) {
             ) {
                 Spacer(modifier = Modifier.height(24.dp))
 
-                // Diagnostic Test Header
+                // Diagnostic Test Header & Logo
+                Surface(
+                    color = Color.White,
+                    shape = RoundedCornerShape(20.dp),
+                    shadowElevation = 4.dp,
+                    modifier = Modifier.size(72.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(4.dp)) {
+                        Image(
+                            painter = painterResource(id = R.drawable.img_app_logo),
+                            contentDescription = "App Logo",
+                            modifier = Modifier
+                                .size(60.dp)
+                                .clip(RoundedCornerShape(14.dp)),
+                            contentScale = ContentScale.Fit
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
                 Text(
-                    text = "🎯 英語字彙能力診斷",
+                    text = "英語字彙能力診斷",
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary

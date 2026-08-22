@@ -38,6 +38,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.foundation.Image
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.layout.ContentScale
 import com.example.data.User
 import com.example.viewmodel.VocabViewModel
 import kotlinx.coroutines.launch
@@ -99,7 +102,42 @@ fun AuthGateSection(viewModel: VocabViewModel) {
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // App Branding Logo Banner
+            Surface(
+                color = Color.White,
+                shape = RoundedCornerShape(20.dp),
+                shadowElevation = 3.dp,
+                modifier = Modifier
+                    .size(76.dp)
+                    .padding(2.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(4.dp)) {
+                    Image(
+                        painter = painterResource(id = R.drawable.img_app_logo),
+                        contentDescription = "Smart Brush Reader Logo",
+                        modifier = Modifier
+                            .size(64.dp)
+                            .clip(RoundedCornerShape(14.dp)),
+                        contentScale = ContentScale.Fit
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Text(
+                text = "Smart Brush Reader",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.ExtraBold,
+                color = MaterialTheme.colorScheme.primary
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
             // Tab Header Toggle
             Row(
                 modifier = Modifier

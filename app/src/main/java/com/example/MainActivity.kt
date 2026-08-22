@@ -147,6 +147,9 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Slider
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.Image
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.layout.ContentScale
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.data.VocabWord
 import com.example.ui.theme.MyApplicationTheme
@@ -2691,18 +2694,27 @@ fun DailyInitLoadingScreen(viewModel: VocabViewModel) {
 
             Box(
                 modifier = Modifier
-                    .size(100.dp)
+                    .size(108.dp)
                     .graphicsLayer {
                         scaleX = scalePulse
                         scaleY = scalePulse
                     }
+                    .shadow(12.dp, RoundedCornerShape(24.dp))
                     .background(
-                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
-                        shape = androidx.compose.foundation.shape.CircleShape
-                    ),
+                        color = Color.White,
+                        shape = RoundedCornerShape(24.dp)
+                    )
+                    .padding(8.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Text("🖌️", fontSize = 42.sp)
+                Image(
+                    painter = painterResource(id = R.drawable.img_app_logo),
+                    contentDescription = "App Logo",
+                    modifier = Modifier
+                        .size(88.dp)
+                        .clip(RoundedCornerShape(18.dp)),
+                    contentScale = ContentScale.Fit
+                )
             }
             
             Column(
@@ -2795,12 +2807,20 @@ fun OnboardingSpotlightOverlay(viewModel: VocabViewModel) {
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     Surface(
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        shape = CircleShape,
-                        modifier = Modifier.size(56.dp)
+                        color = Color.White,
+                        shape = RoundedCornerShape(16.dp),
+                        shadowElevation = 4.dp,
+                        modifier = Modifier.size(68.dp)
                     ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Text("🎯", fontSize = 28.sp)
+                        Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(4.dp)) {
+                            Image(
+                                painter = painterResource(id = R.drawable.img_app_logo),
+                                contentDescription = "App Logo",
+                                modifier = Modifier
+                                    .size(56.dp)
+                                    .clip(RoundedCornerShape(12.dp)),
+                                contentScale = ContentScale.Fit
+                            )
                         }
                     }
 
