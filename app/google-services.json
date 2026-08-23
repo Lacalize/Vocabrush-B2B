@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1005708387940",
+    "project_id": "vocabrush-d67b3",
+    "storage_bucket": "vocabrush-d67b3.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1005708387940:android:51679c213242ca212ea171",
+        "android_client_info": {
+          "package_name": "com.aistudio.vocabbrush.qxvytr"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAi921nj5PLW0oVTnXhW7eFcYXcMV9czFI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
