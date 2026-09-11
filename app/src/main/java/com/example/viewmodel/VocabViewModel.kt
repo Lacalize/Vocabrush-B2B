@@ -160,6 +160,10 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
         loadLoggedInUser()
         triggerDailyInitCheck()
         initFirebaseClassSync()
+        auth?.currentUser?.uid?.let { uid ->
+            startVocabCloudSync(uid)
+            migrateLocalVocabDataToCloud(uid)
+        }
 
         // Periodic background timer tracking active reading duration (only increments when reading mode is active)
         viewModelScope.launch {
@@ -797,6 +801,8 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
         val authUser = auth?.currentUser
         if (authUser != null) {
             val uid = authUser.uid
+            startVocabCloudSync(uid)
+            migrateLocalVocabDataToCloud(uid)
             val db = firestore
             if (db != null) {
                 db.collection("users").document(uid).get()
@@ -860,6 +866,13 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
         }
         sharedPrefs.edit().remove("logged_in_uid").remove("logged_in_email").remove("firebase_class_id").apply()
         leaveClass()
+        stopVocabCloudSync()
+        // Room has no per-user scoping, so it's effectively "the currently logged-in account's cache" —
+        // clear it on logout to avoid leaking one account's vocab/reading data to the next login on a shared device.
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.clearAllWords()
+            repository.clearAllReadArticles()
+        }
         currentUser = null
         currentTab = 0
         activeSubTab = 0
@@ -892,6 +905,8 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                     onResult(false, "建立帳戶失敗，未取得有效身分 UID。")
                     return@addOnSuccessListener
                 }
+                startVocabCloudSync(uid)
+                migrateLocalVocabDataToCloud(uid)
 
                 val profileData = hashMapOf<String, Any>(
                     "name" to cleanName,
@@ -980,6 +995,8 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                     return@addOnSuccessListener
                 }
                 sharedPrefs.edit().putString("logged_in_uid", uid).apply()
+                startVocabCloudSync(uid)
+                migrateLocalVocabDataToCloud(uid)
                 val db = firestore
                 if (db != null) {
                     db.collection("users").document(uid).get()
@@ -1135,21 +1152,248 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ===================== Cloud sync: vocab words & reading progress =====================
+    // Design: Room stays the offline-first local cache the UI already reads from; Firestore becomes
+    // the durable, cross-device source of truth (users/{uid}/androidVocabWords, users/{uid}/androidReadingProgress).
+    // Every local mutation also pushes up to Firestore, and a real-time listener mirrors remote
+    // changes (from another device on the same account, or the initial pull-down on a fresh install)
+    // back into Room. Kept in "android*"-prefixed subcollections rather than reusing PWA's existing
+    // users/{uid}/vocabWords / readHistory: this account's uid CAN be shared with a PWA login on the
+    // same email (same Firebase project), and the two apps' local field shapes differ enough
+    // (contextSentence/sourceArticle vs PWA's phonetic, full-article resume vs PWA's history log)
+    // that reusing the same path risks the two apps silently corrupting each other's records.
+    private var vocabWordsListenerRegistration: ListenerRegistration? = null
+    private var readingProgressListenerRegistration: ListenerRegistration? = null
+
+    private fun slugifyKey(text: String): String {
+        val slug = text.trim().lowercase().replace(Regex("[^a-z0-9\\u4e00-\\u9fff]+"), "_").trim('_')
+        return if (slug.isBlank()) "w_${kotlin.math.abs(text.hashCode())}" else slug.take(150)
+    }
+
+    // signInAnonymously() is used elsewhere (GeminiService.fetchFirebaseIdToken) purely as a
+    // fallback to get *some* auth token for dictionary lookups when nobody is logged in yet — that
+    // anonymous uid is per-install and must never be treated as a real, cross-device account.
+    private fun isRealAccountSignedIn(): Boolean {
+        val user = auth?.currentUser
+        return user != null && !user.isAnonymous
+    }
+
+    private fun vocabWordToMap(word: VocabWord): Map<String, Any> = mapOf(
+        "word" to word.word,
+        "definition" to word.definition,
+        "contextSentence" to word.contextSentence,
+        "timestamp" to word.timestamp,
+        "status" to word.status,
+        "sourceArticle" to word.sourceArticle,
+        "reviewCount" to word.reviewCount
+    )
+
+    private fun readArticleToMap(article: com.example.data.ReadArticle): Map<String, Any> = mapOf(
+        "title" to article.title,
+        "content" to article.content,
+        "lastReadTime" to article.lastReadTime,
+        "lastReadPage" to article.lastReadPage
+    )
+
+    private fun syncVocabWordUp(word: VocabWord) {
+        if (!isRealAccountSignedIn()) return
+        val uid = auth?.currentUser?.uid ?: return
+        firestore?.collection("users")?.document(uid)?.collection("androidVocabWords")
+            ?.document(slugifyKey(word.word))
+            ?.set(vocabWordToMap(word), SetOptions.merge())
+    }
+
+    private fun syncVocabWordDelete(word: VocabWord) {
+        if (!isRealAccountSignedIn()) return
+        val uid = auth?.currentUser?.uid ?: return
+        firestore?.collection("users")?.document(uid)?.collection("androidVocabWords")
+            ?.document(slugifyKey(word.word))
+            ?.delete()
+    }
+
+    private fun syncReadingProgressUp(article: com.example.data.ReadArticle) {
+        if (!isRealAccountSignedIn()) return
+        val uid = auth?.currentUser?.uid ?: return
+        firestore?.collection("users")?.document(uid)?.collection("androidReadingProgress")
+            ?.document(slugifyKey(article.title))
+            ?.set(readArticleToMap(article), SetOptions.merge())
+    }
+
+    private fun syncReadingProgressDelete(article: com.example.data.ReadArticle) {
+        if (!isRealAccountSignedIn()) return
+        val uid = auth?.currentUser?.uid ?: return
+        firestore?.collection("users")?.document(uid)?.collection("androidReadingProgress")
+            ?.document(slugifyKey(article.title))
+            ?.delete()
+    }
+
+    private suspend fun <T> awaitTask(task: com.google.android.gms.tasks.Task<T>): T? =
+        suspendCancellableCoroutine { cont ->
+            task.addOnSuccessListener { cont.resume(it) }
+                .addOnFailureListener { cont.resume(null) }
+        }
+
+    /**
+     * Starts real-time listeners that mirror this account's cloud vocab words / reading progress
+     * into the local Room cache. Safe to call repeatedly (e.g. on every login) — re-attaching just
+     * replaces the previous listener registration. No-ops if not a real (non-anonymous) account.
+     */
+    fun startVocabCloudSync(uid: String) {
+        val db = firestore ?: return
+        if (!isRealAccountSignedIn()) return
+
+        vocabWordsListenerRegistration?.remove()
+        vocabWordsListenerRegistration = db.collection("users").document(uid)
+            .collection("androidVocabWords")
+            .addSnapshotListener { snapshot, error ->
+                if (error != null || snapshot == null) return@addSnapshotListener
+                viewModelScope.launch(Dispatchers.IO) {
+                    for (change in snapshot.documentChanges) {
+                        val doc = change.document
+                        val word = doc.getString("word") ?: continue
+                        if (change.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
+                            repository.getWordByText(word)?.let { repository.deleteById(it.id) }
+                        } else {
+                            val existing = repository.getWordByText(word)
+                            val merged = VocabWord(
+                                id = existing?.id ?: 0,
+                                word = word,
+                                definition = doc.getString("definition") ?: "",
+                                contextSentence = doc.getString("contextSentence") ?: "",
+                                timestamp = doc.getLong("timestamp") ?: System.currentTimeMillis(),
+                                status = (doc.getLong("status") ?: 0L).toInt(),
+                                sourceArticle = doc.getString("sourceArticle") ?: "未分類",
+                                reviewCount = (doc.getLong("reviewCount") ?: 0L).toInt()
+                            )
+                            if (existing != null) repository.update(merged) else repository.insert(merged)
+                        }
+                    }
+                }
+            }
+
+        readingProgressListenerRegistration?.remove()
+        readingProgressListenerRegistration = db.collection("users").document(uid)
+            .collection("androidReadingProgress")
+            .addSnapshotListener { snapshot, error ->
+                if (error != null || snapshot == null) return@addSnapshotListener
+                viewModelScope.launch(Dispatchers.IO) {
+                    for (change in snapshot.documentChanges) {
+                        val doc = change.document
+                        val title = doc.getString("title") ?: continue
+                        if (change.type == com.google.firebase.firestore.DocumentChange.Type.REMOVED) {
+                            repository.getReadArticleByTitle(title)?.let { repository.deleteReadArticleById(it.id) }
+                        } else {
+                            val existing = repository.getReadArticleByTitle(title)
+                            val merged = com.example.data.ReadArticle(
+                                id = existing?.id ?: 0,
+                                title = title,
+                                content = doc.getString("content") ?: existing?.content ?: "",
+                                lastReadTime = doc.getLong("lastReadTime") ?: System.currentTimeMillis(),
+                                lastReadPage = (doc.getLong("lastReadPage") ?: 0L).toInt()
+                            )
+                            repository.insertReadArticle(merged)
+                        }
+                    }
+                }
+            }
+    }
+
+    fun stopVocabCloudSync() {
+        vocabWordsListenerRegistration?.remove()
+        vocabWordsListenerRegistration = null
+        readingProgressListenerRegistration?.remove()
+        readingProgressListenerRegistration = null
+    }
+
+    /**
+     * One-time upload of this device's pre-existing local Room data for [uid], merged against
+     * whatever's already in the cloud (e.g. from another device that logged into this same account
+     * earlier). Gated by a per-(uid, device) flag so it only runs once; ongoing edits after that sync
+     * incrementally via syncVocabWordUp/syncReadingProgressUp. Merge rule is a union that never
+     * silently drops progress: higher reviewCount wins, mastered beats learning, most recent
+     * lastReadTime wins for reading position.
+     */
+    fun migrateLocalVocabDataToCloud(uid: String) {
+        if (!isRealAccountSignedIn()) return
+        val db = firestore ?: return
+        val flagKey = "vocab_cloud_migrated_$uid"
+        if (sharedPrefs.getBoolean(flagKey, false)) return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val wordsCol = db.collection("users").document(uid).collection("androidVocabWords")
+                val remoteWordsBySlug = awaitTask(wordsCol.get())?.documents?.associateBy { it.id } ?: emptyMap()
+
+                val progressCol = db.collection("users").document(uid).collection("androidReadingProgress")
+                val remoteProgressBySlug = awaitTask(progressCol.get())?.documents?.associateBy { it.id } ?: emptyMap()
+
+                val localWords = repository.getAllWords()
+                val localArticles = repository.getAllReadArticles()
+
+                val batch = db.batch()
+                var writes = 0
+
+                for (w in localWords) {
+                    val slug = slugifyKey(w.word)
+                    val remoteDoc = remoteWordsBySlug[slug]
+                    val merged: Map<String, Any> = if (remoteDoc != null) {
+                        val remoteTimestamp = remoteDoc.getLong("timestamp") ?: 0L
+                        val useLocalDescriptive = w.timestamp >= remoteTimestamp
+                        mapOf(
+                            "word" to w.word,
+                            "definition" to if (useLocalDescriptive) w.definition else (remoteDoc.getString("definition") ?: w.definition),
+                            "contextSentence" to if (useLocalDescriptive) w.contextSentence else (remoteDoc.getString("contextSentence") ?: w.contextSentence),
+                            "timestamp" to maxOf(w.timestamp, remoteTimestamp),
+                            "status" to maxOf(w.status, (remoteDoc.getLong("status") ?: 0L).toInt()),
+                            "sourceArticle" to if (useLocalDescriptive) w.sourceArticle else (remoteDoc.getString("sourceArticle") ?: w.sourceArticle),
+                            "reviewCount" to maxOf(w.reviewCount, (remoteDoc.getLong("reviewCount") ?: 0L).toInt())
+                        )
+                    } else vocabWordToMap(w)
+                    batch.set(wordsCol.document(slug), merged, SetOptions.merge())
+                    writes++
+                }
+
+                for (a in localArticles) {
+                    val slug = slugifyKey(a.title)
+                    val remoteDoc = remoteProgressBySlug[slug]
+                    val remoteTime = remoteDoc?.getLong("lastReadTime") ?: -1L
+                    val merged: Map<String, Any> = if (remoteDoc != null && remoteTime >= a.lastReadTime) {
+                        mapOf(
+                            "title" to a.title,
+                            "content" to (remoteDoc.getString("content") ?: a.content),
+                            "lastReadTime" to remoteTime,
+                            "lastReadPage" to (remoteDoc.getLong("lastReadPage") ?: a.lastReadPage.toLong())
+                        )
+                    } else readArticleToMap(a)
+                    batch.set(progressCol.document(slug), merged, SetOptions.merge())
+                    writes++
+                }
+
+                if (writes > 0) {
+                    awaitTask(batch.commit())
+                }
+                sharedPrefs.edit().putBoolean(flagKey, true).apply()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
     fun recordArticleRead(title: String, content: String) {
         if (title.isBlank() || content.isBlank()) return
         viewModelScope.launch(Dispatchers.IO) {
             val existing = repository.getReadArticleByTitle(title)
-            if (existing != null) {
-                repository.insertReadArticle(existing.copy(lastReadTime = System.currentTimeMillis()))
+            val saved = if (existing != null) {
+                existing.copy(lastReadTime = System.currentTimeMillis())
             } else {
-                repository.insertReadArticle(
-                    com.example.data.ReadArticle(
-                        title = title,
-                        content = content,
-                        lastReadTime = System.currentTimeMillis()
-                    )
+                com.example.data.ReadArticle(
+                    title = title,
+                    content = content,
+                    lastReadTime = System.currentTimeMillis()
                 )
             }
+            repository.insertReadArticle(saved)
+            syncReadingProgressUp(saved)
         }
     }
 
@@ -1174,10 +1418,12 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val existing = repository.getReadArticleByTitle(title)
             if (existing != null) {
-                repository.insertReadArticle(existing.copy(
+                val updated = existing.copy(
                     lastReadPage = pageIndex,
                     lastReadTime = System.currentTimeMillis()
-                ))
+                )
+                repository.insertReadArticle(updated)
+                syncReadingProgressUp(updated)
             }
         }
     }
@@ -1194,6 +1440,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteHistoryArticle(article: com.example.data.ReadArticle) {
         viewModelScope.launch(Dispatchers.IO) {
             repository.deleteReadArticleById(article.id)
+            syncReadingProgressDelete(article)
         }
     }
 
@@ -1267,6 +1514,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                     reviewCount = 1
                 )
                 repository.insert(newWord)
+                syncVocabWordUp(newWord)
             } else {
                 val newCount = existing.reviewCount + 1
                 val newStatus = if (newCount >= 5) 1 else existing.status
@@ -1280,6 +1528,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                     status = newStatus
                 )
                 repository.update(updated)
+                syncVocabWordUp(updated)
             }
         }
     }
@@ -1292,6 +1541,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
             val newStatus = if (updatedCount >= 5) 1 else existing.status
             val updated = existing.copy(reviewCount = updatedCount, status = newStatus)
             repository.update(updated)
+            syncVocabWordUp(updated)
         }
     }
 
@@ -1333,6 +1583,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteWord(vocabWord: VocabWord) {
         viewModelScope.launch(Dispatchers.IO) {
             repository.deleteById(vocabWord.id)
+            syncVocabWordDelete(vocabWord)
         }
     }
 
@@ -1340,6 +1591,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             val updated = vocabWord.copy(status = if (vocabWord.status == 0) 1 else 0)
             repository.update(updated)
+            syncVocabWordUp(updated)
         }
     }
 

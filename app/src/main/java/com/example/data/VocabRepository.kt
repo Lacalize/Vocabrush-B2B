@@ -18,6 +18,8 @@ class VocabRepository(
 
     suspend fun deleteById(id: Int) = vocabDao.deleteWordById(id)
 
+    suspend fun clearAllWords() = vocabDao.clearAllWords()
+
     // Read history operations
     val allReadArticlesFlow: Flow<List<ReadArticle>> = vocabDao.getAllReadArticlesFlow()
 
@@ -28,6 +30,8 @@ class VocabRepository(
     suspend fun insertReadArticle(article: ReadArticle): Long = vocabDao.insertReadArticle(article)
 
     suspend fun deleteReadArticleById(id: Int) = vocabDao.deleteReadArticleById(id)
+
+    suspend fun clearAllReadArticles() = vocabDao.clearAllReadArticles()
 
     // Cached news operations
     suspend fun getCachedNewsByCategoryAndDate(category: String, dateString: String): List<CachedNews> =

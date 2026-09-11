@@ -81,7 +81,10 @@ interface VocabDao {
 
     @Query("DELETE FROM vocab_words WHERE id = :id")
     suspend fun deleteWordById(id: Int)
-    
+
+    @Query("DELETE FROM vocab_words")
+    suspend fun clearAllWords()
+
     @Query("SELECT COUNT(*) FROM vocab_words")
     suspend fun getWordCount(): Int
 
@@ -100,6 +103,9 @@ interface VocabDao {
 
     @Query("DELETE FROM read_history WHERE id = :id")
     suspend fun deleteReadArticleById(id: Int)
+
+    @Query("DELETE FROM read_history")
+    suspend fun clearAllReadArticles()
 
     // Cached news queries
     @Query("SELECT * FROM cached_news WHERE category = :category AND dateString = :dateString")
