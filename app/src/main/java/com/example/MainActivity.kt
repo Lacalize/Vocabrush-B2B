@@ -673,14 +673,12 @@ fun ReaderScreen(viewModel: VocabViewModel) {
                         var wordInPageIdx = 0
                         val targetWordsList = viewModel.assignmentTargetWords
 
+                        // Hoisted unconditionally so the scroll position survives toggling isBrushMode
+                        val pageScrollState = rememberScrollState()
                         Column(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .then(
-                                    if (!isBrushMode) {
-                                        Modifier.verticalScroll(rememberScrollState())
-                                    } else Modifier
-                                )
+                                .verticalScroll(pageScrollState, enabled = !isBrushMode)
                         ) {
                             subParagraphs.forEach { subPara ->
                                 val rawWords = subPara.split(Regex("\\s+")).filter { it.isNotBlank() }
