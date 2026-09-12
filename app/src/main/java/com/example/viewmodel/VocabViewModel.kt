@@ -1545,15 +1545,26 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Starts a review session. Pass [customWords] to review one specific article's words in full
+     * (e.g. from the vocab book's per-article "複習這篇文章" button) — used as-is, no cap or shuffle.
+     * With no [customWords] (the general "隨機複習" entry points), a vocab book that's grown large
+     * would otherwise turn every review into reviewing everything at once, so this instead takes a
+     * random sample of 10 words, prioritizing not-yet-mastered words first and only filling the rest
+     * from mastered words if there aren't 10 still being learned.
+     */
     fun startReviewSession(customWords: List<VocabWord>? = null) {
         viewModelScope.launch(Dispatchers.IO) {
-            val allLocalWords = customWords ?: repository.getAllWords()
-            if (allLocalWords.isEmpty()) {
-                return@launch
+            val selectedWords = if (customWords != null) {
+                if (customWords.isEmpty()) return@launch
+                customWords
+            } else {
+                val allLocalWords = repository.getAllWords()
+                if (allLocalWords.isEmpty()) return@launch
+                val learningWords = allLocalWords.filter { it.status == 0 }.shuffled()
+                val masteredWords = allLocalWords.filter { it.status == 1 }.shuffled()
+                (learningWords + masteredWords).take(10)
             }
-            // Prioritize learning/unmastered words (status == 0)
-            val learningWords = allLocalWords.filter { it.status == 0 }
-            val selectedWords = if (learningWords.isNotEmpty()) learningWords else allLocalWords
 
             val details = selectedWords.map { w ->
                 val parts = w.definition.split("-", limit = 2)

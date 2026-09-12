@@ -60,6 +60,10 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.UnfoldMore
+import androidx.compose.material.icons.filled.UnfoldLess
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -2302,10 +2306,19 @@ fun VocabBookScreen(viewModel: VocabViewModel, vocabList: List<VocabWord>) {
     val totalCount = vocabList.size
     val masteredCount = vocabList.count { it.status == 1 }
 
-    // Group the vocabulary list by source article for easy classification/categories
-    val groupedMap = remember(filteredList) {
+    // Group the vocabulary list by source article for easy classification/categories,
+    // most recently studied article first (子母清單: article = 母, its words = 子)
+    val sortedGroups = remember(filteredList) {
         filteredList.groupBy { it.sourceArticle.ifBlank { "來自自訂筆刷查詢" } }
+            .toList()
+            .sortedByDescending { (_, words) -> words.maxOf { it.timestamp } }
     }
+
+    // Per-article collapse state, keyed by sourceArticle. Absent = collapsed by default so a
+    // vocab book with many articles doesn't render as one giant scrolling list.
+    val expandedGroups = remember { mutableStateMapOf<String, Boolean>() }
+    val allExpanded = sortedGroups.isNotEmpty() && sortedGroups.all { (src, _) -> expandedGroups[src] == true }
+    val dateFormatter = remember { java.text.SimpleDateFormat("yyyy/MM/dd", java.util.Locale.TAIWAN) }
 
     Column(
         modifier = Modifier
@@ -2343,11 +2356,31 @@ fun VocabBookScreen(viewModel: VocabViewModel, vocabList: List<VocabWord>) {
             ) {
                 Icon(
                     imageVector = Icons.Default.Refresh,
-                    contentDescription = "一鍵複習",
+                    contentDescription = "隨機複習 10 個字",
                     modifier = Modifier.size(16.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
-                Text("一鍵複習", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Text("隨機複習 10 個", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            }
+        }
+
+        if (sortedGroups.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(onClick = {
+                    val target = !allExpanded
+                    sortedGroups.forEach { (src, _) -> expandedGroups[src] = target }
+                }) {
+                    Icon(
+                        imageVector = if (allExpanded) Icons.Default.UnfoldLess else Icons.Default.UnfoldMore,
+                        contentDescription = if (allExpanded) "全部收合" else "全部展開",
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(if (allExpanded) "全部收合" else "全部展開", fontSize = 12.sp)
+                }
             }
         }
 
@@ -2391,7 +2424,7 @@ fun VocabBookScreen(viewModel: VocabViewModel, vocabList: List<VocabWord>) {
             )
         }
 
-        if (groupedMap.isEmpty()) {
+        if (sortedGroups.isEmpty()) {
             // Empty placeholder state
             Column(
                 modifier = Modifier
@@ -2422,12 +2455,16 @@ fun VocabBookScreen(viewModel: VocabViewModel, vocabList: List<VocabWord>) {
                 )
             }
         } else {
-            // Classified group list cards
-            groupedMap.forEach { (sourceArticle, words) ->
+            // Classified group list cards (子母清單：文章 = 母，底下單字 = 子，可各自收合)
+            sortedGroups.forEach { (sourceArticle, words) ->
+                val isExpanded = expandedGroups[sourceArticle] == true
+                val lastStudied = remember(words) { dateFormatter.format(java.util.Date(words.maxOf { it.timestamp })) }
+
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 8.dp, bottom = 4.dp),
+                        .padding(top = 8.dp, bottom = 4.dp)
+                        .clickable { expandedGroups[sourceArticle] = !isExpanded },
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)),
                     shape = RoundedCornerShape(8.dp)
                 ) {
@@ -2442,30 +2479,53 @@ fun VocabBookScreen(viewModel: VocabViewModel, vocabList: List<VocabWord>) {
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = sourceArticle,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = sourceArticle,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "最近複習 $lastStudied",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+                            )
+                        }
                         Text(
                             text = "${words.size} 個字詞",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.secondary
                         )
+                        IconButton(onClick = { viewModel.startReviewSession(customWords = words) }) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "只複習這篇文章的單字",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        Icon(
+                            imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                            contentDescription = if (isExpanded) "收合" else "展開",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
                     }
                 }
 
-                words.forEach { word ->
-                    VocabWordCard(
-                        word = word,
-                        onToggleMastery = { viewModel.toggleWordMastered(word) },
-                        onDelete = { viewModel.deleteWord(word) }
-                    )
+                AnimatedVisibility(visible = isExpanded) {
+                    Column {
+                        words.forEach { word ->
+                            VocabWordCard(
+                                word = word,
+                                onToggleMastery = { viewModel.toggleWordMastered(word) },
+                                onDelete = { viewModel.deleteWord(word) }
+                            )
+                        }
+                    }
                 }
             }
         }
