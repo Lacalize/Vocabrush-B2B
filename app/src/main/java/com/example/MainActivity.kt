@@ -62,8 +62,6 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.UnfoldMore
-import androidx.compose.material.icons.filled.UnfoldLess
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -2374,7 +2372,7 @@ fun VocabBookScreen(viewModel: VocabViewModel, vocabList: List<VocabWord>) {
                     sortedGroups.forEach { (src, _) -> expandedGroups[src] = target }
                 }) {
                     Icon(
-                        imageVector = if (allExpanded) Icons.Default.UnfoldLess else Icons.Default.UnfoldMore,
+                        imageVector = if (allExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
                         contentDescription = if (allExpanded) "全部收合" else "全部展開",
                         modifier = Modifier.size(16.dp)
                     )
