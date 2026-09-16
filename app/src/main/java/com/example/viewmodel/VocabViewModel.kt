@@ -272,7 +272,9 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun searchPublicDictDirectly(query: String) {
-        val clean = query.trim().lowercase().replace(Regex("[^a-zA-Z-]"), "")
+        // Matches getFromPublicDictionary()'s own key derivation (trim+lowercase only) so this
+        // search tool finds exactly what the real brush-lookup flow would find, phrases included.
+        val clean = query.trim().lowercase()
         if (clean.isBlank()) return
         isPublicDictSearching = true
         publicDictSearchError = null

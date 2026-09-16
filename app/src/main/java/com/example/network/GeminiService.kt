@@ -115,7 +115,13 @@ object VocabTranslationHelper {
      * Query Firestore public dictionary first to avoid calling Gemini API.
      */
     suspend fun getFromPublicDictionary(db: FirebaseFirestore?, word: String): VocabDetail? {
-        val cleanWord = word.trim().lowercase().replace(Regex("[^a-zA-Z-]"), "")
+        // Just trim+lowercase (matches the PWA Cloud Function's key derivation exactly) - not
+        // stripping non-letter characters here anymore. It used to strip everything including
+        // spaces, so a brushed phrase like "make up" collapsed to the same key as the real
+        // single word "makeup", silently returning the wrong (word, not phrase) cached entry.
+        // Punctuation is already cleaned up by the caller before a word/phrase ever reaches here
+        // (see the brush-stroke handling in MainActivity.kt), so this doesn't need to do it too.
+        val cleanWord = word.trim().lowercase()
         if (cleanWord.isEmpty()) return null
 
         // Level 1: In-Memory L1 Cache
@@ -168,7 +174,9 @@ object VocabTranslationHelper {
      * Save a new translation to Firestore public_dictionary so future queries across users hit cache.
      */
     fun saveToPublicDictionary(db: FirebaseFirestore?, detail: VocabDetail) {
-        val cleanWord = detail.word.trim().lowercase().replace(Regex("[^a-zA-Z-]"), "")
+        // Same key derivation as getFromPublicDictionary() above - must match exactly or a save
+        // and a later lookup for the same word/phrase would land on different doc IDs.
+        val cleanWord = detail.word.trim().lowercase()
         if (cleanWord.isEmpty()) return
         if (detail.translation.isBlank() || 
             detail.translation.contains("連線失敗") || 
