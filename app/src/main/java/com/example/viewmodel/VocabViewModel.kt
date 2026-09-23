@@ -163,6 +163,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
         auth?.currentUser?.uid?.let { uid ->
             startVocabCloudSync(uid)
             migrateLocalVocabDataToCloud(uid)
+            migrateAndroidCollectionsToShared(uid)
         }
 
         // Periodic background timer tracking active reading duration (only increments when reading mode is active)
@@ -805,6 +806,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
             val uid = authUser.uid
             startVocabCloudSync(uid)
             migrateLocalVocabDataToCloud(uid)
+            migrateAndroidCollectionsToShared(uid)
             val db = firestore
             if (db != null) {
                 db.collection("users").document(uid).get()
@@ -909,6 +911,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 startVocabCloudSync(uid)
                 migrateLocalVocabDataToCloud(uid)
+                migrateAndroidCollectionsToShared(uid)
 
                 val profileData = hashMapOf<String, Any>(
                     "name" to cleanName,
@@ -999,6 +1002,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                 sharedPrefs.edit().putString("logged_in_uid", uid).apply()
                 startVocabCloudSync(uid)
                 migrateLocalVocabDataToCloud(uid)
+                migrateAndroidCollectionsToShared(uid)
                 val db = firestore
                 if (db != null) {
                     db.collection("users").document(uid).get()
@@ -1156,14 +1160,24 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
 
     // ===================== Cloud sync: vocab words & reading progress =====================
     // Design: Room stays the offline-first local cache the UI already reads from; Firestore becomes
-    // the durable, cross-device source of truth (users/{uid}/androidVocabWords, users/{uid}/androidReadingProgress).
-    // Every local mutation also pushes up to Firestore, and a real-time listener mirrors remote
-    // changes (from another device on the same account, or the initial pull-down on a fresh install)
-    // back into Room. Kept in "android*"-prefixed subcollections rather than reusing PWA's existing
-    // users/{uid}/vocabWords / readHistory: this account's uid CAN be shared with a PWA login on the
-    // same email (same Firebase project), and the two apps' local field shapes differ enough
-    // (contextSentence/sourceArticle vs PWA's phonetic, full-article resume vs PWA's history log)
-    // that reusing the same path risks the two apps silently corrupting each other's records.
+    // the durable, cross-device *and cross-app* source of truth (users/{uid}/vocabWords,
+    // users/{uid}/readHistory - the same collections PWA already uses). Every local mutation also
+    // pushes up to Firestore, and a real-time listener mirrors remote changes (from another device,
+    // or from the PWA app on the same account, or the initial pull-down on a fresh install) back
+    // into Room.
+    //
+    // 2026-09-23: this used to write to separate users/{uid}/androidVocabWords /
+    // androidReadingProgress collections specifically to avoid Android and PWA clobbering each
+    // other's differently-shaped records. Switched to the shared collections on request - the same
+    // account's word list / reading history should be one thing, not split by which app touched it.
+    // Fields each app doesn't know about (Android has no `phonetic`; PWA has no `contextSentence`)
+    // are simply omitted from that app's own writes rather than written as blank - Firestore field
+    // merges (SetOptions.merge() here, updateDoc() on the PWA side) leave whatever the other app
+    // already set untouched. Doc ids are slugifyKey(word) / slugifyKey(title) on both sides now
+    // (PWA switched from random addDoc() ids to the same scheme), so a word/article either app
+    // creates first is the one the other app's later writes land on, instead of creating a duplicate.
+    // migrateAndroidCollectionsToShared() below does a one-time move of any pre-existing
+    // androidVocabWords/androidReadingProgress data for accounts that synced before this change.
     private var vocabWordsListenerRegistration: ListenerRegistration? = null
     private var readingProgressListenerRegistration: ListenerRegistration? = null
 
@@ -1200,7 +1214,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
     private fun syncVocabWordUp(word: VocabWord) {
         if (!isRealAccountSignedIn()) return
         val uid = auth?.currentUser?.uid ?: return
-        firestore?.collection("users")?.document(uid)?.collection("androidVocabWords")
+        firestore?.collection("users")?.document(uid)?.collection("vocabWords")
             ?.document(slugifyKey(word.word))
             ?.set(vocabWordToMap(word), SetOptions.merge())
     }
@@ -1208,7 +1222,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
     private fun syncVocabWordDelete(word: VocabWord) {
         if (!isRealAccountSignedIn()) return
         val uid = auth?.currentUser?.uid ?: return
-        firestore?.collection("users")?.document(uid)?.collection("androidVocabWords")
+        firestore?.collection("users")?.document(uid)?.collection("vocabWords")
             ?.document(slugifyKey(word.word))
             ?.delete()
     }
@@ -1216,7 +1230,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
     private fun syncReadingProgressUp(article: com.example.data.ReadArticle) {
         if (!isRealAccountSignedIn()) return
         val uid = auth?.currentUser?.uid ?: return
-        firestore?.collection("users")?.document(uid)?.collection("androidReadingProgress")
+        firestore?.collection("users")?.document(uid)?.collection("readHistory")
             ?.document(slugifyKey(article.title))
             ?.set(readArticleToMap(article), SetOptions.merge())
     }
@@ -1224,7 +1238,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
     private fun syncReadingProgressDelete(article: com.example.data.ReadArticle) {
         if (!isRealAccountSignedIn()) return
         val uid = auth?.currentUser?.uid ?: return
-        firestore?.collection("users")?.document(uid)?.collection("androidReadingProgress")
+        firestore?.collection("users")?.document(uid)?.collection("readHistory")
             ?.document(slugifyKey(article.title))
             ?.delete()
     }
@@ -1246,7 +1260,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
 
         vocabWordsListenerRegistration?.remove()
         vocabWordsListenerRegistration = db.collection("users").document(uid)
-            .collection("androidVocabWords")
+            .collection("vocabWords")
             .addSnapshotListener { snapshot, error ->
                 if (error != null || snapshot == null) return@addSnapshotListener
                 viewModelScope.launch(Dispatchers.IO) {
@@ -1275,7 +1289,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
 
         readingProgressListenerRegistration?.remove()
         readingProgressListenerRegistration = db.collection("users").document(uid)
-            .collection("androidReadingProgress")
+            .collection("readHistory")
             .addSnapshotListener { snapshot, error ->
                 if (error != null || snapshot == null) return@addSnapshotListener
                 viewModelScope.launch(Dispatchers.IO) {
@@ -1323,10 +1337,10 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val wordsCol = db.collection("users").document(uid).collection("androidVocabWords")
+                val wordsCol = db.collection("users").document(uid).collection("vocabWords")
                 val remoteWordsBySlug = awaitTask(wordsCol.get())?.documents?.associateBy { it.id } ?: emptyMap()
 
-                val progressCol = db.collection("users").document(uid).collection("androidReadingProgress")
+                val progressCol = db.collection("users").document(uid).collection("readHistory")
                 val remoteProgressBySlug = awaitTask(progressCol.get())?.documents?.associateBy { it.id } ?: emptyMap()
 
                 val localWords = repository.getAllWords()
@@ -1374,6 +1388,91 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                 if (writes > 0) {
                     awaitTask(batch.commit())
                 }
+                sharedPrefs.edit().putBoolean(flagKey, true).apply()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    /**
+     * One-time cleanup for accounts that already synced before vocabWords/readHistory were shared
+     * with PWA (2026-09-23): moves whatever's sitting in the old users/{uid}/androidVocabWords and
+     * users/{uid}/androidReadingProgress collections into the shared users/{uid}/vocabWords and
+     * users/{uid}/readHistory collections, merges against anything already there (e.g. from PWA
+     * usage of the same account, most-recent-timestamp/highest-progress wins per field, same rule
+     * as migrateLocalVocabDataToCloud), then deletes the old docs so they don't linger as orphaned
+     * duplicates. Both old and new collections key documents by the same slugifyKey(word/title), so
+     * this is a direct doc-for-doc move, not a re-derivation. Independently gated/no-ops after the
+     * first successful run, and no-ops immediately if the old collections are already empty.
+     */
+    fun migrateAndroidCollectionsToShared(uid: String) {
+        if (!isRealAccountSignedIn()) return
+        val db = firestore ?: return
+        val flagKey = "android_collections_migrated_$uid"
+        if (sharedPrefs.getBoolean(flagKey, false)) return
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val oldWordsCol = db.collection("users").document(uid).collection("androidVocabWords")
+                val oldWords = awaitTask(oldWordsCol.get())?.documents ?: emptyList()
+                val oldProgressCol = db.collection("users").document(uid).collection("androidReadingProgress")
+                val oldProgress = awaitTask(oldProgressCol.get())?.documents ?: emptyList()
+
+                if (oldWords.isEmpty() && oldProgress.isEmpty()) {
+                    sharedPrefs.edit().putBoolean(flagKey, true).apply()
+                    return@launch
+                }
+
+                val newWordsCol = db.collection("users").document(uid).collection("vocabWords")
+                val newProgressCol = db.collection("users").document(uid).collection("readHistory")
+                val newWordsById = awaitTask(newWordsCol.get())?.documents?.associateBy { it.id } ?: emptyMap()
+                val newProgressById = awaitTask(newProgressCol.get())?.documents?.associateBy { it.id } ?: emptyMap()
+
+                val batch = db.batch()
+
+                for (old in oldWords) {
+                    val existing = newWordsById[old.id]
+                    val oldTimestamp = old.getLong("timestamp") ?: 0L
+                    val existingTimestamp = existing?.getLong("timestamp") ?: -1L
+                    val useOldDescriptive = oldTimestamp >= existingTimestamp
+                    val merged = mapOf(
+                        "word" to (old.getString("word") ?: old.id),
+                        "definition" to if (useOldDescriptive) (old.getString("definition") ?: "") else (existing?.getString("definition") ?: old.getString("definition") ?: ""),
+                        "contextSentence" to if (useOldDescriptive) (old.getString("contextSentence") ?: "") else (existing?.getString("contextSentence") ?: old.getString("contextSentence") ?: ""),
+                        "timestamp" to maxOf(oldTimestamp, existingTimestamp),
+                        "status" to maxOf((old.getLong("status") ?: 0L).toInt(), (existing?.getLong("status") ?: 0L).toInt()),
+                        "sourceArticle" to if (useOldDescriptive) (old.getString("sourceArticle") ?: "") else (existing?.getString("sourceArticle") ?: old.getString("sourceArticle") ?: ""),
+                        "reviewCount" to maxOf(old.getLong("reviewCount") ?: 0L, existing?.getLong("reviewCount") ?: 0L)
+                    )
+                    batch.set(newWordsCol.document(old.id), merged, SetOptions.merge())
+                    batch.delete(oldWordsCol.document(old.id))
+                }
+
+                for (old in oldProgress) {
+                    val existing = newProgressById[old.id]
+                    val oldTime = old.getLong("lastReadTime") ?: 0L
+                    val existingTime = existing?.getLong("lastReadTime") ?: -1L
+                    val merged = if (existingTime > oldTime) {
+                        mapOf(
+                            "title" to (old.getString("title") ?: old.id),
+                            "content" to (existing?.getString("content") ?: old.getString("content") ?: ""),
+                            "lastReadTime" to existingTime,
+                            "lastReadPage" to (existing?.getLong("lastReadPage") ?: old.getLong("lastReadPage") ?: 0L)
+                        )
+                    } else {
+                        mapOf(
+                            "title" to (old.getString("title") ?: old.id),
+                            "content" to (old.getString("content") ?: existing?.getString("content") ?: ""),
+                            "lastReadTime" to oldTime,
+                            "lastReadPage" to (old.getLong("lastReadPage") ?: existing?.getLong("lastReadPage") ?: 0L)
+                        )
+                    }
+                    batch.set(newProgressCol.document(old.id), merged, SetOptions.merge())
+                    batch.delete(oldProgressCol.document(old.id))
+                }
+
+                awaitTask(batch.commit())
                 sharedPrefs.edit().putBoolean(flagKey, true).apply()
             } catch (e: Exception) {
                 e.printStackTrace()
