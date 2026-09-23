@@ -1290,10 +1290,37 @@ fun ArticleHubScreen(viewModel: VocabViewModel) {
                     )
                 }
             }
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(if (activeSubTab == 3) MaterialTheme.colorScheme.primary else Color.Transparent)
+                    .clickable { viewModel.activeSubTab = 3 }
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+                    Icon(
+                        imageVector = Icons.Default.Star,
+                        contentDescription = null,
+                        tint = if (activeSubTab == 3) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "教材庫 📚",
+                        color = if (activeSubTab == 3) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp
+                    )
+                }
+            }
         }
 
         if (activeSubTab == 2) {
             ClassAssignmentsSection(viewModel = viewModel)
+        } else if (activeSubTab == 3) {
+            com.example.ui.MaterialsLibrarySection(viewModel = viewModel)
         } else if (activeSubTab == 1) {
             // Custom Text Uploads & Paste Section
             Text(

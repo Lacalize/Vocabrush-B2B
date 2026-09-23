@@ -46,6 +46,13 @@ sealed class AssignmentUiState {
     data class Error(val message: String) : AssignmentUiState()
 }
 
+sealed class MaterialUiState {
+    object Idle : MaterialUiState()
+    object Loading : MaterialUiState()
+    data class Success(val materials: List<com.example.data.Material>) : MaterialUiState()
+    data class Error(val message: String) : MaterialUiState()
+}
+
 class VocabViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository: VocabRepository
@@ -83,9 +90,13 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
         private set
 
     private var assignmentListenerRegistration: ListenerRegistration? = null
+    private var materialListenerRegistration: ListenerRegistration? = null
 
     private val _assignmentUiState = MutableStateFlow<AssignmentUiState>(AssignmentUiState.Idle)
     val assignmentUiState: StateFlow<AssignmentUiState> = _assignmentUiState.asStateFlow()
+
+    private val _materialUiState = MutableStateFlow<MaterialUiState>(MaterialUiState.Idle)
+    val materialUiState: StateFlow<MaterialUiState> = _materialUiState.asStateFlow()
 
     // Onboarding & Target Goal States
     var dailyReadingGoalMinutes by mutableStateOf(sharedPrefs.getInt("daily_reading_goal_mins", 15))
@@ -832,6 +843,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                                     studentClassId = user.classId
                                     sharedPrefs.edit().putString("firebase_class_id", user.classId).apply()
                                     listenToAssignments(user.classId)
+                                    listenToMaterials(user.classId)
                                 }
                             }
                         } else {
@@ -1038,6 +1050,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                                     studentClassId = user.classId
                                     sharedPrefs.edit().putString("firebase_class_id", user.classId).apply()
                                     listenToAssignments(user.classId)
+                                    listenToMaterials(user.classId)
                                 }
                                 onResult(true, "登入成功！")
                             }
@@ -1745,6 +1758,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
             val savedClassId = studentClassId
             if (!savedClassId.isNullOrBlank()) {
                 listenToAssignments(savedClassId)
+                listenToMaterials(savedClassId)
             }
             return
         }
@@ -1767,6 +1781,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                             studentClassId = cloudClassId
                             sharedPrefs.edit().putString("firebase_class_id", cloudClassId).apply()
                             listenToAssignments(cloudClassId)
+                            listenToMaterials(cloudClassId)
                         } else if (!studentClassId.isNullOrBlank()) {
                             // Server has no class on record but we have a local cache — it's stale, clear it
                             // instead of listening with a classId the server will just deny.
@@ -1780,6 +1795,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                         val savedClassId = studentClassId
                         if (!savedClassId.isNullOrBlank()) {
                             listenToAssignments(savedClassId)
+                            listenToMaterials(savedClassId)
                         }
                     }
             } catch (e: Exception) {
@@ -1813,6 +1829,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
             studentClassId = cleanId
             sharedPrefs.edit().putString("firebase_class_id", cleanId).apply()
             listenToAssignments(cleanId)
+            listenToMaterials(cleanId)
             onResult(true, "已綁定班級代碼：$cleanId")
             return
         }
@@ -1846,6 +1863,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                             studentClassId = cleanId
                             sharedPrefs.edit().putString("firebase_class_id", cleanId).apply()
                             listenToAssignments(cleanId)
+                            listenToMaterials(cleanId)
                             onResult(true, "已成功加入班級：$cleanId")
                         }
                         .addOnFailureListener { e ->
@@ -1927,9 +1945,67 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // 教材庫：跟 listenToAssignments() 幾乎一樣的即時監聽邏輯，差別只是走 materials 子集合、
+    // 沒有 dueDate/targetWordList，是老師批次上傳、學生自由選讀的文章庫。
+    fun listenToMaterials(classId: String) {
+        val cleanClassId = classId.trim()
+        if (cleanClassId.isBlank()) return
+        val db = firestore
+        if (db == null) {
+            _materialUiState.value = MaterialUiState.Success(emptyList())
+            return
+        }
+        materialListenerRegistration?.remove()
+        _materialUiState.value = MaterialUiState.Loading
+
+        try {
+            val collectionRef = db.collection("classes")
+                .document(cleanClassId)
+                .collection("materials")
+
+            val query = collectionRef.orderBy("createdAt", com.google.firebase.firestore.Query.Direction.DESCENDING)
+
+            materialListenerRegistration = query.addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    _materialUiState.value = MaterialUiState.Error("即時同步教材失敗：${error.localizedMessage}")
+                    if (error.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED) {
+                        leaveClass()
+                    }
+                    return@addSnapshotListener
+                }
+
+                if (snapshot != null) {
+                    val list = snapshot.documents.mapNotNull { doc ->
+                        try {
+                            com.example.data.Material(
+                                id = doc.id,
+                                classId = cleanClassId,
+                                title = doc.getString("title") ?: "未命名教材",
+                                content = doc.getString("content") ?: "",
+                                unit = doc.getString("unit") ?: "未分類",
+                                createdAt = doc.getTimestamp("createdAt")
+                            )
+                        } catch (e: Exception) {
+                            null
+                        }
+                    }.sortedByDescending { it.createdAt?.seconds ?: 0L }
+
+                    _materialUiState.value = MaterialUiState.Success(list)
+                } else {
+                    _materialUiState.value = MaterialUiState.Success(emptyList())
+                }
+            }
+        } catch (e: Exception) {
+            _materialUiState.value = MaterialUiState.Error("連線異常：${e.localizedMessage}")
+        }
+    }
+
     fun leaveClass() {
         assignmentListenerRegistration?.remove()
         assignmentListenerRegistration = null
+        materialListenerRegistration?.remove()
+        materialListenerRegistration = null
+        _materialUiState.value = MaterialUiState.Idle
         studentClassId = null
         sharedPrefs.edit().remove("firebase_class_id").apply()
         _assignmentUiState.value = AssignmentUiState.Idle
