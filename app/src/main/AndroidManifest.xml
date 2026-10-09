@@ -25,6 +25,28 @@
             </intent-filter>
         </activity>
 
+        <!-- "Vocabrush 翻譯" in the system text-selection menu and share sheet: floating lookup card
+             over any app, saves the word into the vocab book (QuickLookupActivity.kt). -->
+        <activity
+            android:name=".QuickLookupActivity"
+            android:exported="true"
+            android:label="Vocabrush 翻譯"
+            android:theme="@style/Theme.MyApplication.Overlay"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
         <!-- App Widget Configuration Receiver -->
         <receiver android:name="com.example.widget.VocabWidgetProvider"
             android:exported="true">

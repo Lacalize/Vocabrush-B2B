@@ -2,4 +2,13 @@
 <resources>
 
     <style name="Theme.MyApplication" parent="Theme.Material3.DayNight.NoActionBar" />
+
+    <!-- Transparent window so QuickLookupActivity's card floats over the app the user was in. -->
+    <style name="Theme.MyApplication.Overlay">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Dialog</item>
+    </style>
 </resources>

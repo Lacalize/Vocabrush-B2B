@@ -1194,10 +1194,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
     private var vocabWordsListenerRegistration: ListenerRegistration? = null
     private var readingProgressListenerRegistration: ListenerRegistration? = null
 
-    private fun slugifyKey(text: String): String {
-        val slug = text.trim().lowercase().replace(Regex("[^a-z0-9\\u4e00-\\u9fff]+"), "_").trim('_')
-        return if (slug.isBlank()) "w_${kotlin.math.abs(text.hashCode())}" else slug.take(150)
-    }
+    private fun slugifyKey(text: String): String = com.example.data.VocabWordStore.slugifyKey(text)
 
     // signInAnonymously() is used elsewhere (GeminiService.fetchFirebaseIdToken) purely as a
     // fallback to get *some* auth token for dictionary lookups when nobody is logged in yet — that
@@ -1207,15 +1204,7 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
         return user != null && !user.isAnonymous
     }
 
-    private fun vocabWordToMap(word: VocabWord): Map<String, Any> = mapOf(
-        "word" to word.word,
-        "definition" to word.definition,
-        "contextSentence" to word.contextSentence,
-        "timestamp" to word.timestamp,
-        "status" to word.status,
-        "sourceArticle" to word.sourceArticle,
-        "reviewCount" to word.reviewCount
-    )
+    private fun vocabWordToMap(word: VocabWord): Map<String, Any> = com.example.data.VocabWordStore.vocabWordToMap(word)
 
     private fun readArticleToMap(article: com.example.data.ReadArticle): Map<String, Any> = mapOf(
         "title" to article.title,
@@ -1611,39 +1600,11 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun saveWordToDb(detail: VocabDetail, sentence: String) {
-        if (detail.translation.contains("連線失敗") || detail.translation.contains("請先設定金鑰") || detail.translation.contains("發生異常")) {
-            return
-        }
         val currentTitle = if (documentTitle.isBlank()) "自訂匯入文件" else documentTitle
         viewModelScope.launch(Dispatchers.IO) {
-            // Check if word already exists in local database
-            val existing = repository.getWordByText(detail.word)
-            if (existing == null) {
-                val newWord = VocabWord(
-                    word = detail.word,
-                    definition = "${detail.partOfSpeech}. ${detail.translation} - ${detail.definition}",
-                    contextSentence = sentence,
-                    status = 0,
-                    sourceArticle = currentTitle,
-                    reviewCount = 1
-                )
-                repository.insert(newWord)
-                syncVocabWordUp(newWord)
-            } else {
-                val newCount = existing.reviewCount + 1
-                val newStatus = if (newCount >= 5) 1 else existing.status
-                // Update timestamp/sentence to keep it fresh
-                val updated = existing.copy(
-                    definition = "${detail.partOfSpeech}. ${detail.translation} - ${detail.definition}",
-                    contextSentence = sentence,
-                    timestamp = System.currentTimeMillis(),
-                    sourceArticle = currentTitle,
-                    reviewCount = newCount,
-                    status = newStatus
-                )
-                repository.update(updated)
-                syncVocabWordUp(updated)
-            }
+            com.example.data.VocabWordStore.upsertLookedUpWord(
+                getApplication(), detail, sentence, currentTitle, auth, firestore
+            )
         }
     }
 
