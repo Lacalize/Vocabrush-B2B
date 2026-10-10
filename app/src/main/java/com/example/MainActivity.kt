@@ -155,15 +155,13 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.data.VocabWord
 import com.example.ui.theme.MyApplicationTheme
-import com.example.ui.ClassAssignmentsSection
-import com.example.update.ForceUpdateDialog
-import com.example.update.ForceUpdateManager
+import com.example.update.PlayUpdateChecker
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.viewmodel.TranslationState
 import com.example.viewmodel.VocabViewModel
 
 class MainActivity : ComponentActivity() {
-    private lateinit var forceUpdateManager: ForceUpdateManager
+    private lateinit var playUpdateChecker: PlayUpdateChecker
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -175,23 +173,13 @@ class MainActivity : ComponentActivity() {
             e.printStackTrace()
         }
 
-        // Initialize Firebase Remote Config Force Update System
-        forceUpdateManager = ForceUpdateManager(this)
+        // Google Play in-app updates (Play policy forbids self-updating outside the Play Store)
+        // (checked in onResume, which also runs on first launch)
+        playUpdateChecker = PlayUpdateChecker(this)
 
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
-                val updateInfo by forceUpdateManager.updateInfo.collectAsStateWithLifecycle()
-
-                if (updateInfo.isUpdateRequired) {
-                    ForceUpdateDialog(
-                        apkUrl = updateInfo.apkUrl,
-                        onUpdateClick = { url ->
-                            forceUpdateManager.launchUpdateIntent(this@MainActivity, url)
-                        }
-                    )
-                }
-
                 VocabBrushApp()
             }
         }
@@ -199,8 +187,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (::forceUpdateManager.isInitialized) {
-            forceUpdateManager.fetchAndActivate()
+        if (::playUpdateChecker.isInitialized) {
+            playUpdateChecker.resumeIfInProgress()
         }
     }
 }
@@ -1265,63 +1253,9 @@ fun ArticleHubScreen(viewModel: VocabViewModel) {
                     )
                 }
             }
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(if (activeSubTab == 2) MaterialTheme.colorScheme.primary else Color.Transparent)
-                    .clickable { viewModel.activeSubTab = 2 }
-                    .padding(vertical = 10.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-                    Icon(
-                        imageVector = Icons.Default.Home,
-                        contentDescription = null,
-                        tint = if (activeSubTab == 2) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "班級作業 🏫",
-                        color = if (activeSubTab == 2) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp
-                    )
-                }
-            }
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(if (activeSubTab == 3) MaterialTheme.colorScheme.primary else Color.Transparent)
-                    .clickable { viewModel.activeSubTab = 3 }
-                    .padding(vertical = 10.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-                    Icon(
-                        imageVector = Icons.Default.Star,
-                        contentDescription = null,
-                        tint = if (activeSubTab == 3) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "教材庫 📚",
-                        color = if (activeSubTab == 3) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp
-                    )
-                }
-            }
         }
 
-        if (activeSubTab == 2) {
-            ClassAssignmentsSection(viewModel = viewModel)
-        } else if (activeSubTab == 3) {
-            com.example.ui.MaterialsLibrarySection(viewModel = viewModel)
-        } else if (activeSubTab == 1) {
+        if (activeSubTab == 1) {
             // Custom Text Uploads & Paste Section
             Text(
                 text = "📝 自訂英文教材解析",

@@ -13,7 +13,6 @@ import com.example.data.VocabDatabase
 import com.example.data.VocabRepository
 import com.example.data.VocabWord
 import com.example.data.User
-import com.example.data.Assignment
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
@@ -37,20 +36,6 @@ sealed class TranslationState {
     object Loading : TranslationState()
     data class Success(val detail: VocabDetail) : TranslationState()
     data class Error(val message: String) : TranslationState()
-}
-
-sealed class AssignmentUiState {
-    object Idle : AssignmentUiState()
-    object Loading : AssignmentUiState()
-    data class Success(val assignments: List<Assignment>) : AssignmentUiState()
-    data class Error(val message: String) : AssignmentUiState()
-}
-
-sealed class MaterialUiState {
-    object Idle : MaterialUiState()
-    object Loading : MaterialUiState()
-    data class Success(val materials: List<com.example.data.Material>) : MaterialUiState()
-    data class Error(val message: String) : MaterialUiState()
 }
 
 class VocabViewModel(application: Application) : AndroidViewModel(application) {
@@ -86,17 +71,6 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    var studentClassId by mutableStateOf<String?>(sharedPrefs.getString("firebase_class_id", null))
-        private set
-
-    private var assignmentListenerRegistration: ListenerRegistration? = null
-    private var materialListenerRegistration: ListenerRegistration? = null
-
-    private val _assignmentUiState = MutableStateFlow<AssignmentUiState>(AssignmentUiState.Idle)
-    val assignmentUiState: StateFlow<AssignmentUiState> = _assignmentUiState.asStateFlow()
-
-    private val _materialUiState = MutableStateFlow<MaterialUiState>(MaterialUiState.Idle)
-    val materialUiState: StateFlow<MaterialUiState> = _materialUiState.asStateFlow()
 
     // Onboarding & Target Goal States
     var dailyReadingGoalMinutes by mutableStateOf(sharedPrefs.getInt("daily_reading_goal_mins", 15))
@@ -170,7 +144,6 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
         repository = VocabRepository(database.vocabDao(), database.userDao())
         loadLoggedInUser()
         triggerDailyInitCheck()
-        initFirebaseClassSync()
         auth?.currentUser?.uid?.let { uid ->
             startVocabCloudSync(uid)
             migrateLocalVocabDataToCloud(uid)
@@ -839,12 +812,6 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                             viewModelScope.launch {
                                 withContext(Dispatchers.IO) { repository.insertUser(user) }
                                 currentUser = user
-                                if (!user.classId.isNullOrBlank()) {
-                                    studentClassId = user.classId
-                                    sharedPrefs.edit().putString("firebase_class_id", user.classId).apply()
-                                    listenToAssignments(user.classId)
-                                    listenToMaterials(user.classId)
-                                }
                             }
                         } else {
                             viewModelScope.launch {
@@ -881,7 +848,6 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
             e.printStackTrace()
         }
         sharedPrefs.edit().remove("logged_in_uid").remove("logged_in_email").remove("firebase_class_id").apply()
-        leaveClass()
         stopVocabCloudSync()
         // Room has no per-user scoping, so it's effectively "the currently logged-in account's cache" —
         // clear it on logout to avoid leaking one account's vocab/reading data to the next login on a shared device.
@@ -1046,12 +1012,6 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                             viewModelScope.launch {
                                 withContext(Dispatchers.IO) { repository.insertUser(user) }
                                 currentUser = user
-                                if (!user.classId.isNullOrBlank()) {
-                                    studentClassId = user.classId
-                                    sharedPrefs.edit().putString("firebase_class_id", user.classId).apply()
-                                    listenToAssignments(user.classId)
-                                    listenToMaterials(user.classId)
-                                }
                                 onResult(true, "登入成功！")
                             }
                         }
@@ -1094,50 +1054,6 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
                     else -> "登入失敗：${e.localizedMessage ?: "請檢查網路連線"}"
                 }
                 onResult(false, msg)
-            }
-    }
-
-    fun loginWithGoogle(email: String, name: String, onResult: (Boolean, String) -> Unit) {
-        val cleanEmail = email.trim().lowercase()
-        if (cleanEmail.isBlank()) {
-            onResult(false, "Google 連線資料異常。")
-            return
-        }
-        val authObj = auth
-        if (authObj == null) {
-            onResult(false, "Firebase 驗證模組尚未啟動")
-            return
-        }
-        val defaultGooglePass = "GoogleAuth@2026"
-        authObj.signInWithEmailAndPassword(cleanEmail, defaultGooglePass)
-            .addOnSuccessListener { result ->
-                val uid = result.user?.uid ?: return@addOnSuccessListener
-                sharedPrefs.edit().putString("logged_in_uid", uid).apply()
-                loadLoggedInUser()
-                onResult(true, "Google 授權登入成功！")
-            }
-            .addOnFailureListener {
-                authObj.createUserWithEmailAndPassword(cleanEmail, defaultGooglePass)
-                    .addOnSuccessListener { result ->
-                        val uid = result.user?.uid ?: return@addOnSuccessListener
-                        val profileData = hashMapOf<String, Any>(
-                            "name" to name.trim().ifBlank { cleanEmail.substringBefore("@") },
-                            "email" to cleanEmail,
-                            "vocabGoal" to 30,
-                            "vocabLevel" to "PENDING",
-                            "authProvider" to "GOOGLE",
-                            "avatarColorHex" to "#4285F4",
-                            "totalUsageTimeSeconds" to 0L,
-                            "createdAt" to com.google.firebase.firestore.FieldValue.serverTimestamp()
-                        )
-                        firestore?.collection("users")?.document(uid)?.set(profileData, SetOptions.merge())
-                        sharedPrefs.edit().putString("logged_in_uid", uid).apply()
-                        loadLoggedInUser()
-                        onResult(true, "Google 授權登入成功！")
-                    }
-                    .addOnFailureListener { err ->
-                        onResult(false, "Google 授權登入失敗：${err.localizedMessage}")
-                    }
             }
     }
 
@@ -1700,292 +1616,9 @@ class VocabViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * Re-syncs class membership from the server on app start.
-     * Design: a user starts in no class at all. They only ever gain access to a class's
-     * assignments by successfully submitting an existing, teacher-created class code via
-     * joinClass(). This function must NOT start listening to assignments using the locally
-     * cached classId until Firebase Auth has actually finished signing in — firestore.rules'
-     * isClassMember() requires request.auth != null, so attaching the listener before auth
-     * resolves reliably produces a spurious PERMISSION_DENIED error on every cold start.
-     * The server's users/{uid}.classId is treated as the source of truth; if the server has
-     * no classId (e.g. it was cleared by a teacher, or a previous join attempt never actually
-     * persisted), the local cache is cleared too instead of trusting stale local state.
-     */
-    fun initFirebaseClassSync() {
-        val db = firestore
-        if (db == null) {
-            // No Firestore configured (e.g. offline/dev build) — best effort with local cache only.
-            val savedClassId = studentClassId
-            if (!savedClassId.isNullOrBlank()) {
-                listenToAssignments(savedClassId)
-                listenToMaterials(savedClassId)
-            }
-            return
-        }
-
-        ensureFirebaseAuth { uid ->
-            if (uid == null) {
-                // Can't authenticate right now — don't attach a listener that's guaranteed to be denied.
-                if (!studentClassId.isNullOrBlank()) {
-                    _assignmentUiState.value = AssignmentUiState.Error("無法連線驗證身分，暫時無法同步班級作業，請檢查網路後重新開啟 App。")
-                }
-                return@ensureFirebaseAuth
-            }
-
-            try {
-                db.collection("users").document(uid)
-                    .get()
-                    .addOnSuccessListener { doc ->
-                        val cloudClassId = if (doc != null && doc.exists()) doc.getString("classId") else null
-                        if (!cloudClassId.isNullOrBlank()) {
-                            studentClassId = cloudClassId
-                            sharedPrefs.edit().putString("firebase_class_id", cloudClassId).apply()
-                            listenToAssignments(cloudClassId)
-                            listenToMaterials(cloudClassId)
-                        } else if (!studentClassId.isNullOrBlank()) {
-                            // Server has no class on record but we have a local cache — it's stale, clear it
-                            // instead of listening with a classId the server will just deny.
-                            leaveClass()
-                        }
-                    }
-                    .addOnFailureListener { e ->
-                        e.printStackTrace()
-                        // Couldn't reach the server this time; fall back to the local cache so the student
-                        // isn't locked out purely due to a transient network error.
-                        val savedClassId = studentClassId
-                        if (!savedClassId.isNullOrBlank()) {
-                            listenToAssignments(savedClassId)
-                            listenToMaterials(savedClassId)
-                        }
-                    }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-    }
-
-    /**
-     * Joins a class by code. Per design, this is the ONLY event that should grant access to a
-     * class's assignments: the user must enter a class code that (a) actually exists and (b) was
-     * created by a teacher. Two bugs from the previous implementation are fixed here:
-     *  1. The class code was never checked against classes/{classId} before use — any string
-     *     would "succeed" locally even if no such class existed.
-     *  2. Every failure path (addOnFailureListener AND the catch block) still wrote the classId
-     *     locally, started the assignments listener, and called onResult(true, ...) — i.e. it lied
-     *     about success. That leaves local state pointing at a classId the server never actually
-     *     recorded on users/{uid}, so isClassMember() in firestore.rules denies the assignments
-     *     listener afterwards. This is almost certainly the "login error is missing classId" symptom.
-     */
-    fun joinClass(classIdInput: String, onResult: (Boolean, String?) -> Unit) {
-        val cleanId = classIdInput.trim()
-        if (cleanId.isEmpty()) {
-            onResult(false, "班級代碼不能為空！")
-            return
-        }
-
-        val db = firestore
-        if (db == null) {
-            // No Firestore configured (e.g. offline/dev build) — accept locally only, nothing to validate against.
-            studentClassId = cleanId
-            sharedPrefs.edit().putString("firebase_class_id", cleanId).apply()
-            listenToAssignments(cleanId)
-            listenToMaterials(cleanId)
-            onResult(true, "已綁定班級代碼：$cleanId")
-            return
-        }
-
-        ensureFirebaseAuth { uid ->
-            if (uid == null) {
-                onResult(false, "無法建立登入連線，請檢查網路後再試一次。")
-                return@ensureFirebaseAuth
-            }
-
-            // Step 1: verify the class code actually exists (classes/{classId} get is allowed by
-            // firestore.rules specifically for this check).
-            db.collection("classes").document(cleanId)
-                .get()
-                .addOnSuccessListener { classDoc ->
-                    if (classDoc == null || !classDoc.exists()) {
-                        onResult(false, "找不到此班級代碼，請確認代碼是否正確，或向老師確認班級是否已建立。")
-                        return@addOnSuccessListener
-                    }
-
-                    // Step 2: class exists — now write classId onto the user's own profile document.
-                    val userData = hashMapOf(
-                        "name" to (currentUser?.name ?: "學生"),
-                        "role" to "student",
-                        "classId" to cleanId
-                    )
-
-                    db.collection("users").document(uid)
-                        .set(userData, SetOptions.merge())
-                        .addOnSuccessListener {
-                            studentClassId = cleanId
-                            sharedPrefs.edit().putString("firebase_class_id", cleanId).apply()
-                            listenToAssignments(cleanId)
-                            listenToMaterials(cleanId)
-                            onResult(true, "已成功加入班級：$cleanId")
-                        }
-                        .addOnFailureListener { e ->
-                            // Do NOT touch local state or start listening — the server write failed,
-                            // so pretending success here is exactly what caused the stale-state bug.
-                            onResult(false, "加入班級失敗，請稍後再試：${e.localizedMessage}")
-                        }
-                }
-                .addOnFailureListener { e ->
-                    onResult(false, "驗證班級代碼失敗，請檢查網路後再試一次：${e.localizedMessage}")
-                }
-        }
-    }
-
-    fun listenToAssignments(classId: String) {
-        val cleanClassId = classId.trim()
-        if (cleanClassId.isBlank()) return
-        val db = firestore
-        if (db == null) {
-            _assignmentUiState.value = AssignmentUiState.Success(emptyList())
-            return
-        }
-        assignmentListenerRegistration?.remove()
-        _assignmentUiState.value = AssignmentUiState.Loading
-
-        try {
-            // Strictly listen to subcollection path: classes/{classCode}/assignments
-            val collectionRef = db.collection("classes")
-                .document(cleanClassId)
-                .collection("assignments")
-
-            val query = collectionRef.orderBy("createdAt", com.google.firebase.firestore.Query.Direction.DESCENDING)
-
-            assignmentListenerRegistration = query.addSnapshotListener { snapshot, error ->
-                if (error != null) {
-                    _assignmentUiState.value = AssignmentUiState.Error("即時同步作業失敗：${error.localizedMessage}")
-                    if (error.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED) {
-                        // The server no longer considers this device a member of the class (e.g. stale
-                        // local cache from a join that never actually persisted). Reset locally so the
-                        // student isn't stuck seeing a permanent error for a class they're not really in.
-                        leaveClass()
-                    }
-                    return@addSnapshotListener
-                }
-
-                if (snapshot != null) {
-                    val list = snapshot.documents.mapNotNull { doc ->
-                        try {
-                            val id = doc.id
-                            val title = doc.getString("title") ?: "未命名作業"
-                            val content = doc.getString("content") ?: ""
-                            @Suppress("UNCHECKED_CAST")
-                            val rawWords = doc.get("targetWordList") as? List<*>
-                            val targetWordList = rawWords?.mapNotNull { it?.toString() } ?: emptyList()
-                            val dueDate = doc.getTimestamp("dueDate")
-                            val createdAt = doc.getTimestamp("createdAt")
-
-                            Assignment(
-                                id = id,
-                                classId = cleanClassId,
-                                title = title,
-                                content = content,
-                                targetWordList = targetWordList,
-                                dueDate = dueDate,
-                                createdAt = createdAt
-                            )
-                        } catch (e: Exception) {
-                            null
-                        }
-                    }.sortedByDescending { it.createdAt?.seconds ?: 0L }
-
-                    _assignmentUiState.value = AssignmentUiState.Success(list)
-                } else {
-                    _assignmentUiState.value = AssignmentUiState.Success(emptyList())
-                }
-            }
-        } catch (e: Exception) {
-            _assignmentUiState.value = AssignmentUiState.Error("連線異常：${e.localizedMessage}")
-        }
-    }
-
-    // 教材庫：跟 listenToAssignments() 幾乎一樣的即時監聽邏輯，差別只是走 materials 子集合、
-    // 沒有 dueDate/targetWordList，是老師批次上傳、學生自由選讀的文章庫。
-    fun listenToMaterials(classId: String) {
-        val cleanClassId = classId.trim()
-        if (cleanClassId.isBlank()) return
-        val db = firestore
-        if (db == null) {
-            _materialUiState.value = MaterialUiState.Success(emptyList())
-            return
-        }
-        materialListenerRegistration?.remove()
-        _materialUiState.value = MaterialUiState.Loading
-
-        try {
-            val collectionRef = db.collection("classes")
-                .document(cleanClassId)
-                .collection("materials")
-
-            val query = collectionRef.orderBy("createdAt", com.google.firebase.firestore.Query.Direction.DESCENDING)
-
-            materialListenerRegistration = query.addSnapshotListener { snapshot, error ->
-                if (error != null) {
-                    _materialUiState.value = MaterialUiState.Error("即時同步教材失敗：${error.localizedMessage}")
-                    if (error.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED) {
-                        leaveClass()
-                    }
-                    return@addSnapshotListener
-                }
-
-                if (snapshot != null) {
-                    val list = snapshot.documents.mapNotNull { doc ->
-                        try {
-                            com.example.data.Material(
-                                id = doc.id,
-                                classId = cleanClassId,
-                                title = doc.getString("title") ?: "未命名教材",
-                                content = doc.getString("content") ?: "",
-                                unit = doc.getString("unit") ?: "未分類",
-                                createdAt = doc.getTimestamp("createdAt")
-                            )
-                        } catch (e: Exception) {
-                            null
-                        }
-                    }.sortedByDescending { it.createdAt?.seconds ?: 0L }
-
-                    _materialUiState.value = MaterialUiState.Success(list)
-                } else {
-                    _materialUiState.value = MaterialUiState.Success(emptyList())
-                }
-            }
-        } catch (e: Exception) {
-            _materialUiState.value = MaterialUiState.Error("連線異常：${e.localizedMessage}")
-        }
-    }
-
-    fun leaveClass() {
-        assignmentListenerRegistration?.remove()
-        assignmentListenerRegistration = null
-        materialListenerRegistration?.remove()
-        materialListenerRegistration = null
-        _materialUiState.value = MaterialUiState.Idle
-        studentClassId = null
-        sharedPrefs.edit().remove("firebase_class_id").apply()
-        _assignmentUiState.value = AssignmentUiState.Idle
-
-        // Best-effort: also clear the server-side record so the next initFirebaseClassSync() doesn't
-        // just pull the same stale classId back in and re-trigger the same PERMISSION_DENIED loop.
-        val db = firestore
-        val uid = auth?.currentUser?.uid
-        if (db != null && uid != null) {
-            db.collection("users").document(uid)
-                .update("classId", com.google.firebase.firestore.FieldValue.delete())
-                .addOnFailureListener { e -> e.printStackTrace() }
-        }
-    }
-
     override fun onCleared() {
         super.onCleared()
-        assignmentListenerRegistration?.remove()
-        assignmentListenerRegistration = null
+        stopVocabCloudSync()
     }
 
     /**
