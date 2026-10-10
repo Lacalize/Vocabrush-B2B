@@ -81,7 +81,7 @@ dependencies {
   implementation(libs.firebase.analytics)
   implementation(libs.firebase.firestore)
   implementation(libs.firebase.auth)
-  implementation(libs.firebase.config)
+  implementation(libs.play.app.update.ktx)
   implementation(libs.firebase.crashlytics)
   implementation(libs.google.material)
   // implementation(libs.accompanist.permissions)
