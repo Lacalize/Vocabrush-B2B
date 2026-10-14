@@ -27,7 +27,7 @@ class PlayUpdateChecker(private val activity: ComponentActivity) {
     private val updateLauncher = activity.registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
-        if (result.resultCode != ComponentActivity.RESULT_OK) {
+        if (result.resultCode != android.app.Activity.RESULT_OK) {
             // User backed out of a required update - ask again (resumeIfInProgress re-checks on resume).
             Log.w(TAG, "Immediate update flow not completed: ${result.resultCode}")
         }
